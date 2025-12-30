@@ -48,6 +48,11 @@ var ParameterSynonyms = map[string][]string{
 	"search":      {"old_string", "old_text", "find", "pattern"},
 	"replace":     {"new_string", "new_text", "replacement"},
 	"replacement": {"new_string", "new_text", "replace"},
+
+	// Search/grep pattern variations (Opus often confuses description with pattern)
+	"description": {"pattern", "query", "search_term"},
+	"pattern":     {"search", "regex", "query", "search_term"},
+	"query":       {"pattern", "search", "search_term"},
 }
 
 // ToolDefaults defines default values for commonly missing required parameters.
@@ -124,36 +129,64 @@ func hasGrepContextConflict(argsJSON string) bool {
 }
 
 // sanitizeGrepArgs fixes grep tool arguments to avoid Cursor validation errors.
+// Handles two issues:
+// 1. -A/-B/-C context parameter conflicts
+// 2. Opus model confusing "description" with "pattern" (e.g. {"description": "pattern: XXX"})
 func sanitizeGrepArgs(args map[string]interface{}) bool {
+	changed := false
+
+	// Fix 1: Handle description -> pattern confusion from Opus model
+	// Opus often writes: {"description": "pattern: handleProcessError", "path": "..."}
+	// instead of: {"pattern": "handleProcessError", "path": "..."}
+	if _, hasPattern := args["pattern"]; !hasPattern {
+		if desc, hasDesc := args["description"]; hasDesc {
+			if descStr, ok := desc.(string); ok {
+				// Extract actual pattern from "pattern: XXX" format
+				actualPattern := descStr
+				if strings.HasPrefix(strings.ToLower(descStr), "pattern:") {
+					actualPattern = strings.TrimSpace(descStr[8:]) // len("pattern:") = 8
+				} else if strings.HasPrefix(strings.ToLower(descStr), "pattern ") {
+					actualPattern = strings.TrimSpace(descStr[8:]) // len("pattern ") = 8
+				}
+				if actualPattern != "" {
+					args["pattern"] = actualPattern
+					delete(args, "description")
+					changed = true
+				}
+			}
+		}
+	}
+
+	// Fix 2: Handle -A/-B/-C context parameter conflicts
 	cVal, cExists := args["-C"]
 	_, aExists := args["-A"]
 	_, bExists := args["-B"]
 
-	if !cExists || (!aExists && !bExists) {
-		return false // No conflict
-	}
-
-	// Helper to check if value is effectively zero
-	isZero := func(v interface{}) bool {
-		switch val := v.(type) {
-		case float64:
-			return val == 0
-		case int:
-			return val == 0
-		case int64:
-			return val == 0
+	if cExists && (aExists || bExists) {
+		// Helper to check if value is effectively zero
+		isZero := func(v interface{}) bool {
+			switch val := v.(type) {
+			case float64:
+				return val == 0
+			case int:
+				return val == 0
+			case int64:
+				return val == 0
+			}
+			return false
 		}
-		return false
+
+		// If -C is non-zero, it takes precedence - remove -A and -B
+		if !isZero(cVal) {
+			delete(args, "-A")
+			delete(args, "-B")
+			changed = true
+		} else {
+			// -C is zero - remove it, keep -A/-B
+			delete(args, "-C")
+			changed = true
+		}
 	}
 
-	// If -C is non-zero, it takes precedence - remove -A and -B
-	if !isZero(cVal) {
-		delete(args, "-A")
-		delete(args, "-B")
-		return true
-	}
-
-	// -C is zero - remove it, keep -A/-B
-	delete(args, "-C")
-	return true
+	return changed
 }
