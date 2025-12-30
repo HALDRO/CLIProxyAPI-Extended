@@ -84,6 +84,11 @@ func extractSystemPrompt(messages []ir.Message) string {
 func processMessages(messages []ir.Message, tools []interface{}, modelID, origin string) ([]interface{}, map[string]interface{}) {
 	nonSystem := filterSystemMessages(messages)
 	nonSystem = mergeConsecutiveMessages(nonSystem)
+
+	// Handle prefill: if last message is from assistant without tool_calls, it's a prefill
+	// Kiro doesn't support prefill, so we remove it
+	nonSystem = removePrefill(nonSystem)
+
 	nonSystem = alternateRoles(nonSystem)
 
 	if len(nonSystem) == 0 {
@@ -107,6 +112,28 @@ func processMessages(messages []ir.Message, tools []interface{}, modelID, origin
 		currentMessage = convertMessage(nonSystem[len(nonSystem)-1], tools, modelID, origin, true)
 	}
 	return history, currentMessage
+}
+
+// removePrefill removes trailing assistant messages that are prefills (no tool_calls).
+// Prefill is a technique where the assistant message contains the start of the expected response
+// to guide the model's output format. Kiro doesn't support this.
+func removePrefill(messages []ir.Message) []ir.Message {
+	if len(messages) == 0 {
+		return messages
+	}
+
+	// Check if last message is an assistant message without tool_calls (prefill)
+	lastIdx := len(messages) - 1
+	lastMsg := messages[lastIdx]
+
+	if lastMsg.Role == ir.RoleAssistant && len(lastMsg.ToolCalls) == 0 {
+		// This is a prefill - remove it
+		// Note: We could alternatively append the prefill content to the previous user message
+		// as a hint, but for now we just remove it as Kiro doesn't support prefill
+		return messages[:lastIdx]
+	}
+
+	return messages
 }
 
 func filterSystemMessages(messages []ir.Message) []ir.Message {

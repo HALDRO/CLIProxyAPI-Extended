@@ -847,6 +847,40 @@ func TranslateOpenAIResponseStreamForced(to sdktranslator.Format, openaiChunk []
 				chunks = append(chunks, chunk)
 			}
 		}
+	case "claude":
+		// Convert OpenAI streaming chunks to Claude SSE format
+		// This is needed when Claude Code CLI sends requests through providers
+		// that use OpenAI-compatible APIs (like Cline)
+		claudeState := from_ir.NewClaudeStreamState()
+		claudeState.Model = model
+		claudeState.MessageID = messageID
+
+		for _, event := range events {
+			chunkBytes, err := from_ir.ToClaudeSSE(event, model, messageID, claudeState)
+			if err != nil {
+				return nil, err
+			}
+			if len(chunkBytes) > 0 {
+				chunks = append(chunks, chunkBytes)
+			}
+		}
+
+		// If we have events but no chunks yet, we might need to emit message_start
+		if len(chunks) == 0 && len(events) > 0 {
+			// Check if any event has content that should trigger output
+			for _, event := range events {
+				if event.Type == ir.EventTypeFinish {
+					// Emit finish events
+					finishBytes, err := from_ir.ToClaudeSSE(event, model, messageID, claudeState)
+					if err != nil {
+						return nil, err
+					}
+					if len(finishBytes) > 0 {
+						chunks = append(chunks, finishBytes)
+					}
+				}
+			}
+		}
 	default:
 		// Unsupported target format, return nil to trigger fallback
 		return nil, nil

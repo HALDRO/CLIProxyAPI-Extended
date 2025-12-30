@@ -356,11 +356,19 @@ func parseResponsesContentPart(part gjson.Result) *ir.ContentPart {
 
 // ParseOpenAIResponse parses non-streaming response FROM OpenAI API into unified format.
 // Auto-detects format: Responses API has "output" array, Chat Completions has "choices" array.
+// Also handles Cline API wrapper format: {"data": {"choices": [...]}, "success": true}
 func ParseOpenAIResponse(rawJSON []byte) ([]ir.Message, *ir.Usage, error) {
 	if !gjson.ValidBytes(rawJSON) {
 		return nil, nil, &json.UnmarshalTypeError{Value: "invalid json"}
 	}
 	root := gjson.ParseBytes(rawJSON)
+
+	// Handle Cline API wrapper format: {"data": {...}, "success": true}
+	// Unwrap the "data" field if present
+	if dataField := root.Get("data"); dataField.Exists() && dataField.IsObject() {
+		root = dataField
+	}
+
 	usage := ir.ParseOpenAIUsage(root.Get("usage"))
 
 	// Responses API format: has "output" array with message/reasoning/function_call items

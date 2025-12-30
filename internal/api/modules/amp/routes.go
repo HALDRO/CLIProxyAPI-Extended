@@ -280,6 +280,7 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 		v1Amp.POST("/responses", fallbackHandler.WrapHandler(openaiResponsesHandlers.Responses))
 
 		// Claude/Anthropic-compatible endpoints with fallback
+		v1Amp.HEAD("/messages", func(c *gin.Context) { c.Status(http.StatusOK) })
 		v1Amp.POST("/messages", fallbackHandler.WrapHandler(claudeCodeHandlers.ClaudeMessages))
 		v1Amp.POST("/messages/count_tokens", fallbackHandler.WrapHandler(claudeCodeHandlers.ClaudeCountTokens))
 	}

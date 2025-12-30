@@ -436,7 +436,18 @@ func emitSignatureDelta(signature string, state *ClaudeStreamState) string {
 
 func emitToolCall(tc *ir.ToolCall, state *ClaudeStreamState) string {
 	var result strings.Builder
-	if state != nil && state.TextBlockStarted && !state.TextBlockStopped {
+
+	// Claude API requires index:0 text block to exist before tool_use blocks
+	// If no text block was started, emit an empty one first
+	if state != nil && !state.TextBlockStarted {
+		state.TextBlockStarted = true
+		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStart, map[string]interface{}{
+			"type": ir.ClaudeSSEContentBlockStart, "index": state.TextBlockIndex,
+			"content_block": map[string]interface{}{"type": ir.ClaudeBlockText, "text": ""},
+		}))
+		state.TextBlockStopped = true
+		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]interface{}{"type": ir.ClaudeSSEContentBlockStop, "index": state.TextBlockIndex}))
+	} else if state != nil && state.TextBlockStarted && !state.TextBlockStopped {
 		state.TextBlockStopped = true
 		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]interface{}{"type": ir.ClaudeSSEContentBlockStop, "index": state.TextBlockIndex}))
 	}

@@ -666,3 +666,4 @@ func (p *GeminiCLIProvider) ParseStreamChunk(chunkJSON []byte) ([]ir.UnifiedEven
 func (p *GeminiCLIProvider) ParseStreamChunkWithContext(chunkJSON []byte, schemaCtx *ir.ToolSchemaContext) ([]ir.UnifiedEvent, error) {
 	return to_ir.ParseGeminiChunkWithContext(chunkJSON, schemaCtx)
 }
+

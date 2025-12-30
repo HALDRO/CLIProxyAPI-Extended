@@ -251,26 +251,28 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*corea
 }
 
 type requestContext struct {
-	ctx         context.Context
-	auth        *coreauth.Auth
-	req         cliproxyexecutor.Request
-	token       string
-	kiroModelID string
-	requestID   string
-	irReq       *ir.UnifiedChatRequest
-	kiroBody    []byte
-	origin      string
-	isAgentic   bool
+	ctx          context.Context
+	auth         *coreauth.Auth
+	req          cliproxyexecutor.Request
+	token        string
+	kiroModelID  string
+	requestID    string
+	irReq        *ir.UnifiedChatRequest
+	kiroBody     []byte
+	origin       string
+	isAgentic    bool
+	sourceFormat string
 }
 
-func (e *KiroExecutor) prepareRequest(ctx context.Context, auth *coreauth.Auth, req cliproxyexecutor.Request) (*requestContext, error) {
+func (e *KiroExecutor) prepareRequest(ctx context.Context, auth *coreauth.Auth, req cliproxyexecutor.Request, sourceFormat string) (*requestContext, error) {
 	rc := &requestContext{
-		ctx:       ctx,
-		auth:      auth,
-		req:       req,
-		requestID: uuid.New().String()[:8],
-		origin:    e.determineOrigin(req.Model),
-		isAgentic: e.isAgenticModel(req.Model),
+		ctx:          ctx,
+		auth:         auth,
+		req:          req,
+		requestID:    uuid.New().String()[:8],
+		origin:       e.determineOrigin(req.Model),
+		isAgentic:    e.isAgenticModel(req.Model),
+		sourceFormat: sourceFormat,
 	}
 
 	var err error
@@ -283,7 +285,16 @@ func (e *KiroExecutor) prepareRequest(ctx context.Context, auth *coreauth.Auth, 
 	}
 
 	rc.kiroModelID = mapModelID(req.Model)
-	rc.irReq, err = to_ir.ParseOpenAIRequest([]byte(ir.SanitizeText(string(req.Payload))))
+
+	// Parse request based on source format
+	sanitizedPayload := []byte(ir.SanitizeText(string(req.Payload)))
+	switch sourceFormat {
+	case "claude":
+		rc.irReq, err = to_ir.ParseClaudeRequest(sanitizedPayload)
+	default:
+		// Default to OpenAI format (covers "openai", "cline", etc.)
+		rc.irReq, err = to_ir.ParseOpenAIRequest(sanitizedPayload)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -350,7 +361,7 @@ func (e *KiroExecutor) buildHTTPRequest(rc *requestContext, url string) (*http.R
 }
 
 func (e *KiroExecutor) Execute(ctx context.Context, auth *coreauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	rc, err := e.prepareRequest(ctx, auth, req)
+	rc, err := e.prepareRequest(ctx, auth, req, opts.SourceFormat.String())
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
@@ -448,9 +459,9 @@ func (e *KiroExecutor) executeWithRetry(rc *requestContext) (cliproxyexecutor.Re
 		defer resp.Body.Close()
 
 		if strings.HasPrefix(resp.Header.Get("Content-Type"), "application/vnd.amazon.eventstream") {
-			return e.handleEventStreamResponse(resp.Body, rc.req.Model)
+			return e.handleEventStreamResponse(resp.Body, rc.req.Model, rc.sourceFormat)
 		}
-		return e.handleJSONResponse(resp.Body, rc.req.Model)
+		return e.handleJSONResponse(resp.Body, rc.req.Model, rc.sourceFormat)
 	}
 
 	if lastErr != nil {
@@ -459,7 +470,7 @@ func (e *KiroExecutor) executeWithRetry(rc *requestContext) (cliproxyexecutor.Re
 	return cliproxyexecutor.Response{}, fmt.Errorf("kiro: max retries exceeded")
 }
 
-func (e *KiroExecutor) handleEventStreamResponse(body io.ReadCloser, model string) (cliproxyexecutor.Response, error) {
+func (e *KiroExecutor) handleEventStreamResponse(body io.ReadCloser, model string, sourceFormat string) (cliproxyexecutor.Response, error) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(nil, 52_428_800) // 50MB buffer to handle large AWS EventStream frames
 	scanner.Split(splitAWSEventStream)
@@ -477,14 +488,15 @@ func (e *KiroExecutor) handleEventStreamResponse(body io.ReadCloser, model strin
 		msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: state.AccumulatedContent})
 	}
 
-	converted, err := from_ir.ToOpenAIChatCompletion([]ir.Message{*msg}, nil, model, "chatcmpl-"+uuid.New().String())
+	messageID := "chatcmpl-" + uuid.New().String()
+	converted, err := e.convertToSourceFormat([]ir.Message{*msg}, nil, model, messageID, sourceFormat)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
 	return cliproxyexecutor.Response{Payload: converted}, nil
 }
 
-func (e *KiroExecutor) handleJSONResponse(body io.ReadCloser, model string) (cliproxyexecutor.Response, error) {
+func (e *KiroExecutor) handleJSONResponse(body io.ReadCloser, model string, sourceFormat string) (cliproxyexecutor.Response, error) {
 	rawData, err := io.ReadAll(body)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
@@ -495,15 +507,27 @@ func (e *KiroExecutor) handleJSONResponse(body io.ReadCloser, model string) (cli
 		return cliproxyexecutor.Response{}, err
 	}
 
-	converted, err := from_ir.ToOpenAIChatCompletion(messages, usage, model, "chatcmpl-"+uuid.New().String())
+	messageID := "chatcmpl-" + uuid.New().String()
+	converted, err := e.convertToSourceFormat(messages, usage, model, messageID, sourceFormat)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
 	return cliproxyexecutor.Response{Payload: converted}, nil
 }
 
+// convertToSourceFormat converts IR messages to the appropriate response format based on sourceFormat.
+func (e *KiroExecutor) convertToSourceFormat(messages []ir.Message, usage *ir.Usage, model, messageID, sourceFormat string) ([]byte, error) {
+	switch sourceFormat {
+	case "claude":
+		return from_ir.ToClaudeResponse(messages, usage, model, messageID)
+	default:
+		// Default to OpenAI format
+		return from_ir.ToOpenAIChatCompletion(messages, usage, model, messageID)
+	}
+}
+
 func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *coreauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (<-chan cliproxyexecutor.StreamChunk, error) {
-	rc, err := e.prepareRequest(ctx, auth, req)
+	rc, err := e.prepareRequest(ctx, auth, req, opts.SourceFormat.String())
 	if err != nil {
 		return nil, err
 	}
@@ -598,7 +622,7 @@ func (e *KiroExecutor) executeStreamWithRetry(rc *requestContext) (<-chan clipro
 		}
 
 		out := make(chan cliproxyexecutor.StreamChunk)
-		go e.processStream(resp, rc.req.Model, rc.req.Payload, out)
+		go e.processStream(resp, rc.req.Model, rc.req.Payload, rc.sourceFormat, out)
 		return out, nil
 	}
 
@@ -608,7 +632,7 @@ func (e *KiroExecutor) executeStreamWithRetry(rc *requestContext) (<-chan clipro
 	return nil, fmt.Errorf("kiro: max retries exceeded for stream")
 }
 
-func (e *KiroExecutor) processStream(resp *http.Response, model string, requestPayload []byte, out chan<- cliproxyexecutor.StreamChunk) {
+func (e *KiroExecutor) processStream(resp *http.Response, model string, requestPayload []byte, sourceFormat string, out chan<- cliproxyexecutor.StreamChunk) {
 	defer resp.Body.Close()
 	defer close(out)
 
@@ -619,6 +643,12 @@ func (e *KiroExecutor) processStream(resp *http.Response, model string, requestP
 	messageID := "chatcmpl-" + uuid.New().String()
 	idx := 0
 
+	// Create Claude stream state if needed
+	var claudeState *from_ir.ClaudeStreamState
+	if sourceFormat == "claude" {
+		claudeState = from_ir.NewClaudeStreamState()
+	}
+
 	for scanner.Scan() {
 		payload, err := parseEventPayload(scanner.Bytes())
 		if err != nil {
@@ -626,7 +656,8 @@ func (e *KiroExecutor) processStream(resp *http.Response, model string, requestP
 		}
 		events, _ := state.ProcessChunk(payload)
 		for _, ev := range events {
-			if chunk, _ := from_ir.ToOpenAIChunk(ev, model, messageID, idx); len(chunk) > 0 {
+			chunk, err := e.convertStreamChunkToSourceFormat(ev, model, messageID, idx, sourceFormat, claudeState)
+			if err == nil && len(chunk) > 0 {
 				out <- cliproxyexecutor.StreamChunk{Payload: chunk}
 				idx++
 			}
@@ -679,8 +710,19 @@ func (e *KiroExecutor) processStream(resp *http.Response, model string, requestP
 		}
 	}
 
-	if chunk, _ := from_ir.ToOpenAIChunk(finish, model, messageID, idx); len(chunk) > 0 {
+	chunk, err := e.convertStreamChunkToSourceFormat(finish, model, messageID, idx, sourceFormat, claudeState)
+	if err == nil && len(chunk) > 0 {
 		out <- cliproxyexecutor.StreamChunk{Payload: chunk}
+	}
+}
+
+// convertStreamChunkToSourceFormat converts a streaming event to the appropriate format.
+func (e *KiroExecutor) convertStreamChunkToSourceFormat(ev ir.UnifiedEvent, model, messageID string, idx int, sourceFormat string, claudeState *from_ir.ClaudeStreamState) ([]byte, error) {
+	switch sourceFormat {
+	case "claude":
+		return from_ir.ToClaudeSSE(ev, model, messageID, claudeState)
+	default:
+		return from_ir.ToOpenAIChunk(ev, model, messageID, idx)
 	}
 }
 
