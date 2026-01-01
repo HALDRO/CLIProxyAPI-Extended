@@ -56,7 +56,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 			out, _ = sjson.SetRaw(out, "system_instruction", systemInstruction)
 		}
 	} else if systemResult.Type == gjson.String {
-		out, _ = sjson.Set(out, "request.system_instruction.parts.-1.text", systemResult.String())
+		out, _ = sjson.Set(out, "system_instruction.parts.-1.text", systemResult.String())
 	}
 
 	// contents
@@ -103,7 +103,8 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						funcName := toolCallID
 						toolCallIDs := strings.Split(toolCallID, "-")
 						if len(toolCallIDs) > 1 {
-							funcName = strings.Join(toolCallIDs[0:len(toolCallIDs)-1], "-")
+							rawFuncName := strings.Join(toolCallIDs[0:len(toolCallIDs)-2], "-")
+							funcName = util.SanitizeFunctionName(rawFuncName)
 						}
 						responseData := contentResult.Get("content").Raw
 						part := `{"functionResponse":{"name":"","response":{"result":""}}}`

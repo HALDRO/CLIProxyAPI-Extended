@@ -52,6 +52,8 @@ With `use-canonical-translator: false`, the system runs on the legacy translator
 | **Cline** | Provider with free models (MiniMax M2, Grok) |
 | **Model Registry** | Support for provider:modelID keys, visual prefixes |
 | **ThinkingSupport** | Metadata for reasoning-capable models |
+| **Stop Reason Mapping** | Correct mapping of finishReason to stop_reason for multi-turn conversations |
+| **Function Name Sanitization** | Utility to ensure function names comply with provider requirements |
 
 ---
 
@@ -74,6 +76,15 @@ With `use-canonical-translator: false`, the system runs on the legacy translator
 ```
 
 **Result:** 15 files (5 parsers + 5 emitters + 5 IR core), minimal duplication.
+
+### Zero Repetition Implementation
+
+The fixes were implemented with **zero code repetition** by centralizing key functionality:
+
+- **`SanitizeFunctionName` utility** — Single function in `internal/util/util.go` used across all translators (Codex, Antigravity, Gemini, Gemini CLI)
+- **Unified stop reason mapping** — Consistent logic applied to all providers instead of duplicate implementations
+- **Shared tool ID parsing** — Centralized fix for tool_use_id parsing bug applied to all relevant translators
+- **Common schema placeholder logic** — Single implementation for preventing unnecessary placeholders
 
 ## Metrics
 
@@ -169,6 +180,9 @@ translator_new/
 
 - **Reasoning/Thinking** — unified handling of thinking blocks with `reasoning_tokens` tracking
 - **Tool Calls** — unified ID generation and argument parsing
+- **Stop Reason Mapping** — correct mapping of finishReason to stop_reason for multi-turn conversations (fixes Claude Code stopping after single turn)
+- **Function Name Sanitization** — utility to ensure function names comply with provider requirements (e.g., Gemini/Vertex AI naming rules)
+- **Tool ID Parsing** — fixed bug where function name extraction used wrong index from tool_use_id format
 - **Multimodal** — images, PDF, inline data
 - **Streaming** — SSE (OpenAI/Claude) and NDJSON (Gemini/Ollama)
 - **Responses API** — full support for `/v1/responses`
@@ -308,6 +322,30 @@ CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and A
 
 Contributions are welcome! Simple bug fixes with ready-to-merge code will likely be accepted. For larger changes or feature requests, consider forking — this gives you full control over the direction of your modifications.
 
+Those projects are based on CLIProxyAPI:
+
+### [vibeproxy](https://github.com/automazeio/vibeproxy)
+
+Native macOS menu bar app to use your Claude Code & ChatGPT subscriptions with AI coding tools - no API keys needed
+
+### [Subtitle Translator](https://github.com/VjayC/SRT-Subtitle-Translator-Validator)
+
+Browser-based tool to translate SRT subtitles using your Gemini subscription via CLIProxyAPI with automatic validation/error correction - no API keys needed
+
+### [CCS (Claude Code Switch)](https://github.com/kaitranntt/ccs)
+
+CLI wrapper for instant switching between multiple Claude accounts and alternative models (Gemini, Codex, Antigravity) via CLIProxyAPI OAuth - no API keys needed
+
+### [ProxyPal](https://github.com/heyhuynhgiabuu/proxypal)
+
+Native macOS GUI for managing CLIProxyAPI: configure providers, model mappings, and endpoints via OAuth - no API keys needed.
+
+### [Quotio](https://github.com/nguyenphutrong/quotio)
+
+Native macOS menu bar app that unifies Claude, Gemini, OpenAI, Qwen, and Antigravity subscriptions with real-time quota tracking and smart auto-failover for AI coding tools like Claude Code, OpenCode, and Droid - no API keys needed.
+
+> [!NOTE]  
+> If you developed a project based on CLIProxyAPI, please open a PR to add it to this list.
 
 ## License
 
