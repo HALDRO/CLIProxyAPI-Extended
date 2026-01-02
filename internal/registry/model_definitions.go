@@ -770,6 +770,7 @@ func GetClineModels() []*ModelInfo {
 			Description:         "xAI's Grok Coding model - fast model for coding",
 			ContextLength:       256000,
 			MaxCompletionTokens: 16384,
+			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 		},
 		{
 			ID:                  "minimax/minimax-m2",
@@ -781,6 +782,7 @@ func GetClineModels() []*ModelInfo {
 			Description:         "Open source model with good performance",
 			ContextLength:       192000,
 			MaxCompletionTokens: 128000,
+			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 		},
 		{
 			ID:                  "z-ai/glm-4.6",
@@ -792,6 +794,7 @@ func GetClineModels() []*ModelInfo {
 			Description:         "Zhipu AI's latest agentic coding model in GLM series",
 			ContextLength:       200000,
 			MaxCompletionTokens: 128000,
+			Thinking:            &ThinkingSupport{Levels: []string{"none", "auto", "minimal", "low", "medium", "high", "xhigh"}},
 		},
 		{
 			ID:                  "mistralai/devstral-2512:free",
@@ -1115,10 +1118,11 @@ func GetAmazonQModels() []*ModelInfo {
 }
 
 // AntigravityModelConfig captures static antigravity model overrides, including
-// Thinking budget limits and provider max completion tokens.
+// Thinking budget limits, context length, and provider max completion tokens.
 type AntigravityModelConfig struct {
 	Thinking            *ThinkingSupport
 	MaxCompletionTokens int
+	ContextLength       int
 	Name                string
 }
 
@@ -1126,13 +1130,13 @@ type AntigravityModelConfig struct {
 // Keys use the ALIASED model names (after modelName2Alias conversion) for direct lookup.
 func GetAntigravityModelConfig() map[string]*AntigravityModelConfig {
 	return map[string]*AntigravityModelConfig{
-		"gemini-2.5-flash":                        {Thinking: &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true}, Name: "models/gemini-2.5-flash"},
-		"gemini-2.5-flash-lite":                   {Thinking: &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true}, Name: "models/gemini-2.5-flash-lite"},
-		"gemini-2.5-computer-use-preview-10-2025": {Name: "models/gemini-2.5-computer-use-preview-10-2025"},
-		"gemini-3-pro-preview":                    {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}}, Name: "models/gemini-3-pro-preview"},
-		"gemini-3-pro-image-preview":              {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}}, Name: "models/gemini-3-pro-image-preview"},
-		"gemini-3-flash-preview":                  {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"minimal", "low", "medium", "high"}}, Name: "models/gemini-3-flash-preview"},
-		"gemini-claude-sonnet-4-5-thinking":       {Thinking: &ThinkingSupport{Min: 1024, Max: 200000, ZeroAllowed: false, DynamicAllowed: true}, MaxCompletionTokens: 64000},
-		"gemini-claude-opus-4-5-thinking":         {Thinking: &ThinkingSupport{Min: 1024, Max: 200000, ZeroAllowed: false, DynamicAllowed: true}, MaxCompletionTokens: 64000},
+		"gemini-2.5-flash":                        {Thinking: &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true}, ContextLength: 1048576, MaxCompletionTokens: 65536, Name: "models/gemini-2.5-flash"},
+		"gemini-2.5-flash-lite":                   {Thinking: &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true}, ContextLength: 1048576, MaxCompletionTokens: 65536, Name: "models/gemini-2.5-flash-lite"},
+		"gemini-2.5-computer-use-preview-10-2025": {ContextLength: 1048576, MaxCompletionTokens: 65536, Name: "models/gemini-2.5-computer-use-preview-10-2025"},
+		"gemini-3-pro-preview":                    {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}}, ContextLength: 1048576, MaxCompletionTokens: 65536, Name: "models/gemini-3-pro-preview"},
+		"gemini-3-pro-image-preview":              {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}}, ContextLength: 1048576, MaxCompletionTokens: 65536, Name: "models/gemini-3-pro-image-preview"},
+		"gemini-3-flash-preview":                  {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"minimal", "low", "medium", "high"}}, ContextLength: 1048576, MaxCompletionTokens: 65536, Name: "models/gemini-3-flash-preview"},
+		"gemini-claude-sonnet-4-5-thinking":       {Thinking: &ThinkingSupport{Min: 1024, Max: 200000, ZeroAllowed: false, DynamicAllowed: true}, ContextLength: 200000, MaxCompletionTokens: 64000},
+		"gemini-claude-opus-4-5-thinking":         {Thinking: &ThinkingSupport{Min: 1024, Max: 200000, ZeroAllowed: false, DynamicAllowed: true}, ContextLength: 200000, MaxCompletionTokens: 64000},
 	}
 }

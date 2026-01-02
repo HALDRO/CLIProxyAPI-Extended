@@ -521,6 +521,11 @@ func statusFromError(err error) int {
 }
 
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, metadata map[string]any, err *interfaces.ErrorMessage) {
+	// Apply global model aliases first (before any other processing)
+	if h.Cfg != nil && len(h.Cfg.ModelAliases) > 0 {
+		modelName = util.ResolveModelAlias(modelName, h.Cfg.ModelAliases)
+	}
+
 	// Resolve "auto" model to an actual available model first
 	resolvedModelName := util.ResolveAutoModel(modelName)
 

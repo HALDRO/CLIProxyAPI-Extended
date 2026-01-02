@@ -655,6 +655,8 @@ func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any 
 				for providerType := range registration.Providers {
 					modelInfoCopy := *registration.Info
 					modelInfoCopy.Type = providerType
+					// Enrich with static data and normalize cross-platform fields
+					r.enrichWithStaticInfo(&modelInfoCopy, registration.Info.ID)
 
 					model := r.convertModelToMap(&modelInfoCopy, handlerType)
 					if model != nil {
@@ -663,7 +665,11 @@ func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any 
 				}
 			} else {
 				// No providers tracked or prefixes disabled - show once with original type
-				model := r.convertModelToMap(registration.Info, handlerType)
+				modelInfoCopy := *registration.Info
+				// Enrich with static data and normalize cross-platform fields
+				r.enrichWithStaticInfo(&modelInfoCopy, registration.Info.ID)
+
+				model := r.convertModelToMap(&modelInfoCopy, handlerType)
 				if model != nil {
 					models = append(models, model)
 				}
@@ -816,6 +822,12 @@ func (r *ModelRegistry) GetModelInfo(modelID string) *ModelInfo {
 
 // findStaticModel searches all static model lists for a match
 func (r *ModelRegistry) findStaticModel(id string) *ModelInfo {
+	return FindStaticModel(id)
+}
+
+// FindStaticModel searches all static model lists for a match by model ID.
+// This is a public function that can be used by executors to enrich dynamic models.
+func FindStaticModel(id string) *ModelInfo {
 	lists := [][]*ModelInfo{
 		GetClaudeModels(),
 		GetGeminiModels(),
@@ -1011,6 +1023,17 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		}
 		if len(model.SupportedParameters) > 0 {
 			result["supported_parameters"] = model.SupportedParameters
+		}
+		if model.Thinking != nil {
+			result["thinking"] = map[string]any{
+				"min":             model.Thinking.Min,
+				"max":             model.Thinking.Max,
+				"zero_allowed":    model.Thinking.ZeroAllowed,
+				"dynamic_allowed": model.Thinking.DynamicAllowed,
+			}
+			if len(model.Thinking.Levels) > 0 {
+				result["thinking"].(map[string]any)["levels"] = model.Thinking.Levels
+			}
 		}
 		return result
 

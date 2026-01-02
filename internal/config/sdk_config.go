@@ -30,6 +30,21 @@ type SDKConfig struct {
 	// When true, SDK handlers skip legacy format conversions and pass raw payloads
 	// to the new translator which natively supports all formats.
 	UseCanonicalTranslator bool `yaml:"use-canonical-translator" json:"use-canonical-translator"`
+
+	// ModelAliases defines global model name aliases applied before provider resolution.
+	// When a request arrives with a model name matching an alias key, it is transparently
+	// rewritten to the target model. This works across all providers and endpoints.
+	// Example: "gpt-4" -> "claude-sonnet-4" routes all gpt-4 requests to Claude.
+	ModelAliases []ModelAlias `yaml:"model-aliases,omitempty" json:"model-aliases,omitempty"`
+}
+
+// ModelAlias defines a single model name alias mapping.
+type ModelAlias struct {
+	// From is the model name that clients send (the alias).
+	From string `yaml:"from" json:"from"`
+
+	// To is the actual model name to route to.
+	To string `yaml:"to" json:"to"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.

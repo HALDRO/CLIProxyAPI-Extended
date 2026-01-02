@@ -125,9 +125,9 @@ func convertToResponsesAPIRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 			}
 			continue
 		}
-		if item := convertMessageToResponsesInputWithContext(msg, toolCallContext); item != nil {
-			input = append(input, item)
-		}
+		// convertMessageToResponsesInputWithContext returns []interface{} for messages with multiple tool calls
+		items := convertMessageToResponsesInputWithContext(msg, toolCallContext)
+		input = append(input, items...)
 	}
 	if len(input) > 0 {
 		m["input"] = input
@@ -296,61 +296,65 @@ func (ctx *toolCallContext) getToolNameByCallID(toolCallID string) string {
 	return ""
 }
 
-func convertMessageToResponsesInputWithContext(msg ir.Message, ctx *toolCallContext) interface{} {
+// convertMessageToResponsesInputWithContext converts a message to Responses API input items.
+// Returns a slice because assistant messages with multiple tool calls produce multiple items:
+// - One message item for text content (if any)
+// - One function_call item for each tool call
+// This matches the Codex API format where each tool call is a separate top-level object.
+func convertMessageToResponsesInputWithContext(msg ir.Message, ctx *toolCallContext) []interface{} {
 	switch msg.Role {
 	case ir.RoleSystem:
 		// System messages are NOT supported in Responses API input[].
 		// They must be passed via the top-level "instructions" field.
-		// This case returns nil to skip system messages in input array.
 		return nil
 	case ir.RoleUser:
-		return buildResponsesUserMessage(msg)
-	case ir.RoleAssistant:
-		if len(msg.ToolCalls) > 0 {
-			tc := msg.ToolCalls[0]
-			// Check if this is a custom tool (e.g., apply_patch)
-			// Custom tools use "input" field instead of "arguments" and different type
-			if tc.IsCustom || ctx.isCustomToolByContext(tc.ID, tc.Name) {
-				return map[string]interface{}{
-					"type": "custom_tool_call", "call_id": tc.ID, "name": tc.Name, "input": tc.Args,
-				}
-			}
-			return map[string]interface{}{
-				"type": "function_call", "call_id": tc.ID, "name": tc.Name, "arguments": tc.Args,
-			}
+		if item := buildResponsesUserMessage(msg); item != nil {
+			return []interface{}{item}
 		}
+		return nil
+	case ir.RoleAssistant:
+		var items []interface{}
+		// First, add text content as a message (if any)
 		if text := ir.CombineTextParts(msg); text != "" {
-			return map[string]interface{}{
+			items = append(items, map[string]interface{}{
 				"type": "message", "role": "assistant",
 				"content": []interface{}{map[string]interface{}{"type": "output_text", "text": text}},
+			})
+		}
+		// Then, add each tool call as a separate function_call item
+		// This is required for parallel tool calls - each must be a top-level object
+		for _, tc := range msg.ToolCalls {
+			if tc.IsCustom || ctx.isCustomToolByContext(tc.ID, tc.Name) {
+				items = append(items, map[string]interface{}{
+					"type": "custom_tool_call", "call_id": tc.ID, "name": tc.Name, "input": tc.Args,
+				})
+			} else {
+				items = append(items, map[string]interface{}{
+					"type": "function_call", "call_id": tc.ID, "name": tc.Name, "arguments": tc.Args,
+				})
 			}
 		}
+		return items
 	case ir.RoleTool:
+		// Tool results - each tool result is a separate function_call_output item
+		var items []interface{}
 		for _, part := range msg.Content {
 			if part.Type == ir.ContentTypeToolResult && part.ToolResult != nil {
 				toolCallID := part.ToolResult.ToolCallID
-				// Check if this is a result for a custom tool
-				// Custom tools use "custom_tool_call_output" type
 				if ctx.isCustomToolByContext(toolCallID, ctx.getToolNameByCallID(toolCallID)) {
-					return map[string]interface{}{
+					items = append(items, map[string]interface{}{
 						"type": "custom_tool_call_output", "call_id": toolCallID, "output": part.ToolResult.Result,
-					}
-				}
-				return map[string]interface{}{
-					"type": "function_call_output", "call_id": toolCallID, "output": part.ToolResult.Result,
+					})
+				} else {
+					items = append(items, map[string]interface{}{
+						"type": "function_call_output", "call_id": toolCallID, "output": part.ToolResult.Result,
+					})
 				}
 			}
 		}
+		return items
 	}
 	return nil
-}
-
-func convertMessageToResponsesInput(msg ir.Message) interface{} {
-	// Legacy function without context - uses empty context
-	return convertMessageToResponsesInputWithContext(msg, &toolCallContext{
-		toolCallIDToName: make(map[string]string),
-		customTools:      map[string]bool{"apply_patch": true},
-	})
 }
 
 func buildResponsesUserMessage(msg ir.Message) interface{} {

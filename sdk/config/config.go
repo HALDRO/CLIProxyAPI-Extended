@@ -19,6 +19,7 @@ type AmpCode = internalconfig.AmpCode
 type PayloadConfig = internalconfig.PayloadConfig
 type PayloadRule = internalconfig.PayloadRule
 type PayloadModelRule = internalconfig.PayloadModelRule
+type ModelAlias = internalconfig.ModelAlias
 
 type GeminiKey = internalconfig.GeminiKey
 type CodexKey = internalconfig.CodexKey

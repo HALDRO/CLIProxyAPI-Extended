@@ -37,6 +37,13 @@ var dataTag = []byte("data:")
 // - web_search tool mapping - convert web_search_20250305 to native web_search
 // - tool name shortening - shorten MCP tool names to 64 chars max
 func applyCodexSpecificFields(body []byte, modelName string) []byte {
+	// 0. Remove unsupported parameters - Codex API does NOT support these
+	// Sending them results in "Unsupported parameter" error (400)
+	body, _ = sjson.DeleteBytes(body, "temperature")
+	body, _ = sjson.DeleteBytes(body, "top_p")
+	body, _ = sjson.DeleteBytes(body, "top_k")
+	body, _ = sjson.DeleteBytes(body, "max_output_tokens")
+
 	// 1. Set store to false
 	body, _ = sjson.SetBytes(body, "store", false)
 

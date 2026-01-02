@@ -59,34 +59,13 @@ func (h *OpenAIAPIHandler) Models() []map[string]any {
 // OpenAIModels handles the /v1/models endpoint.
 // It returns a list of available AI models with their capabilities
 // and specifications in OpenAI-compatible format.
+// Extended fields (context_length, max_completion_tokens, thinking, etc.) are included
+// for clients that can utilize them. OpenAI SDK and compatible clients safely ignore
+// unknown fields via Pydantic's model_extra mechanism.
 func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
-	// Get all available models
-	allModels := h.Models()
-
-	// Filter to only include the 4 required fields: id, object, created, owned_by
-	filteredModels := make([]map[string]any, len(allModels))
-	for i, model := range allModels {
-		filteredModel := map[string]any{
-			"id":     model["id"],
-			"object": model["object"],
-		}
-
-		// Add created field if it exists
-		if created, exists := model["created"]; exists {
-			filteredModel["created"] = created
-		}
-
-		// Add owned_by field if it exists
-		if ownedBy, exists := model["owned_by"]; exists {
-			filteredModel["owned_by"] = ownedBy
-		}
-
-		filteredModels[i] = filteredModel
-	}
-
 	c.JSON(http.StatusOK, gin.H{
 		"object": "list",
-		"data":   filteredModels,
+		"data":   h.Models(),
 	})
 }
 

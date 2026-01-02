@@ -12,6 +12,9 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// ModelAlias is re-exported for convenience.
+type ModelAlias = config.ModelAlias
+
 // GetProviderName determines all AI service providers capable of serving a registered model.
 // It first queries the global model registry to retrieve the providers backing the supplied model name.
 // When the model has not been registered yet, it falls back to legacy string heuristics to infer
@@ -78,6 +81,40 @@ func NormalizeIncomingModelID(modelID string) string {
 func ExtractProviderFromPrefixedModelID(modelID string) string {
 	normalizer := registry.NewModelIDNormalizer()
 	return normalizer.ExtractProviderFromPrefixedID(modelID)
+}
+
+// ResolveModelAlias checks if the given model name has a configured alias and returns
+// the target model name. If no alias is configured, returns the original model name.
+// This function is the single point of alias resolution for all incoming requests.
+//
+// Parameters:
+//   - modelName: The model name from the client request
+//   - aliases: The list of configured model aliases
+//
+// Returns:
+//   - string: The resolved model name (either aliased or original)
+func ResolveModelAlias(modelName string, aliases []config.ModelAlias) string {
+	if modelName == "" || len(aliases) == 0 {
+		return modelName
+	}
+
+	normalizedRequest := strings.ToLower(strings.TrimSpace(modelName))
+
+	for _, alias := range aliases {
+		from := strings.ToLower(strings.TrimSpace(alias.From))
+		to := strings.TrimSpace(alias.To)
+
+		if from == "" || to == "" {
+			continue
+		}
+
+		if normalizedRequest == from {
+			log.Debugf("model alias resolved: %s -> %s", modelName, to)
+			return to
+		}
+	}
+
+	return modelName
 }
 
 // ResolveAutoModel resolves the "auto" model name to an actual available model.

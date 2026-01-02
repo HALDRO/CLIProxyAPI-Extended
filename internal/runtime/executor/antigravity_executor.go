@@ -931,24 +931,44 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 				if cfg != nil && cfg.Name != "" {
 					modelName = cfg.Name
 				}
-				modelInfo := &registry.ModelInfo{
-					ID:          aliasName,
-					Name:        modelName,
-					Description: aliasName,
-					DisplayName: aliasName,
-					Version:     aliasName,
-					Object:      "model",
-					Created:     now,
-					OwnedBy:     antigravityAuthType,
-					Type:        antigravityAuthType,
+
+				// Try to get base model info from static definitions first
+				var modelInfo *registry.ModelInfo
+				if static := registry.FindStaticModel(aliasName); static != nil {
+					// Clone static model and override provider-specific fields
+					clone := *static
+					clone.OwnedBy = antigravityAuthType
+					clone.Type = antigravityAuthType
+					clone.Created = now
+					if modelName != aliasName {
+						clone.Name = modelName
+					}
+					modelInfo = &clone
+				} else {
+					// Fallback: create minimal model info
+					modelInfo = &registry.ModelInfo{
+						ID:          aliasName,
+						Name:        modelName,
+						Description: aliasName,
+						DisplayName: aliasName,
+						Version:     aliasName,
+						Object:      "model",
+						Created:     now,
+						OwnedBy:     antigravityAuthType,
+						Type:        antigravityAuthType,
+					}
 				}
-				// Look up Thinking support from static config using alias name
+
+				// Override with Antigravity-specific config if present
 				if cfg != nil {
 					if cfg.Thinking != nil {
 						modelInfo.Thinking = cfg.Thinking
 					}
 					if cfg.MaxCompletionTokens > 0 {
 						modelInfo.MaxCompletionTokens = cfg.MaxCompletionTokens
+					}
+					if cfg.ContextLength > 0 {
+						modelInfo.ContextLength = cfg.ContextLength
 					}
 				}
 

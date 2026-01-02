@@ -65,6 +65,17 @@ proxy-url: ""
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
 force-model-prefix: false
 
+# Global model aliases
+# Transparently rewrite model names before provider resolution. Works across all providers and endpoints.
+# Useful for creating shortcuts, redirecting deprecated models, or routing to preferred providers.
+# model-aliases:
+#   - from: "gpt-4"                    # Client sends this model name
+#     to: "claude-sonnet-4"            # Route to this model instead
+#   - from: "gpt-4-turbo"
+#     to: "[Gemini CLI] gemini-2.5-pro" # Can include provider prefix for explicit routing
+#   - from: "my-fast-model"
+#     to: "gemini-2.5-flash"           # Create custom shortcuts
+
 # Number of times to retry a request. Retries will occur if the HTTP response code is 403, 408, 500, 502, 503, or 504.
 request-retry: 3
 
