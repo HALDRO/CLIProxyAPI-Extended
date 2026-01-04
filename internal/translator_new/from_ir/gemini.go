@@ -284,6 +284,16 @@ func (p *GeminiProvider) applyAssistantText(contents *[]interface{}, msg ir.Mess
 				pMap["thoughtSignature"] = part.ThoughtSignature
 			}
 			parts = append(parts, pMap)
+		case ir.ContentTypeImage:
+			if part.Image != nil {
+				// Inline image support in assistant history
+				parts = append(parts, map[string]interface{}{
+					"inlineData": map[string]interface{}{
+						"mimeType": part.Image.MimeType,
+						"data":     part.Image.Data,
+					},
+				})
+			}
 		}
 	}
 

@@ -49,12 +49,26 @@ func NewClaudeStreamParserState() *ClaudeStreamParserState {
 }
 
 // ParseClaudeUsage parses Claude usage object into IR Usage.
+// Handles cache_read_input_tokens and cache_creation_input_tokens for proper token accounting.
 func ParseClaudeUsage(usage gjson.Result) *Usage {
 	if !usage.Exists() {
 		return nil
 	}
-	input, output := int(usage.Get("input_tokens").Int()), int(usage.Get("output_tokens").Int())
-	return &Usage{PromptTokens: input, CompletionTokens: output, TotalTokens: input + output}
+	input := int(usage.Get("input_tokens").Int())
+	output := int(usage.Get("output_tokens").Int())
+	cacheRead := int(usage.Get("cache_read_input_tokens").Int())
+	cacheCreation := int(usage.Get("cache_creation_input_tokens").Int())
+
+	// Include cache_creation_input_tokens in prompt tokens (these are tokens written to cache)
+	// cache_read_input_tokens are cached tokens that were read (not billed as new input)
+	promptTokens := input + cacheCreation
+
+	return &Usage{
+		PromptTokens:     promptTokens,
+		CompletionTokens: output,
+		TotalTokens:      promptTokens + output,
+		CachedTokens:     cacheRead,
+	}
 }
 
 // ParseClaudeContentBlock parses a Claude content block into IR Message parts.

@@ -560,7 +560,8 @@ func buildImageDelta(event ir.UnifiedEvent) map[string]interface{} {
 		"role": "assistant",
 		"images": []interface{}{
 			map[string]interface{}{
-				"type": "image_url",
+				"index":     0,
+				"type":      "image_url",
 				"image_url": map[string]string{
 					"url": fmt.Sprintf("data:%s;base64,%s", event.Image.MimeType, event.Image.Data),
 				},

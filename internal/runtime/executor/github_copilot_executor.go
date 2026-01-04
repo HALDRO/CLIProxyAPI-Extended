@@ -79,9 +79,17 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
+
+	// Prepare original payload for payload config comparison
+	originalPayload := bytes.Clone(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = bytes.Clone(opts.OriginalRequest)
+	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, req.Model, originalPayload, false)
+
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
 	body = e.normalizeModel(req.Model, body)
-	body = applyPayloadConfig(e.cfg, req.Model, body)
+	body = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", body, originalTranslated)
 	body, _ = sjson.SetBytes(body, "stream", false)
 
 	url := githubCopilotBaseURL + githubCopilotChatPath
@@ -162,9 +170,17 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
+
+	// Prepare original payload for payload config comparison
+	originalPayload := bytes.Clone(req.Payload)
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = bytes.Clone(opts.OriginalRequest)
+	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, req.Model, originalPayload, true)
+
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
 	body = e.normalizeModel(req.Model, body)
-	body = applyPayloadConfig(e.cfg, req.Model, body)
+	body = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", body, originalTranslated)
 	body, _ = sjson.SetBytes(body, "stream", true)
 	// Enable stream options for usage stats in stream
 	body, _ = sjson.SetBytes(body, "stream_options.include_usage", true)

@@ -308,7 +308,6 @@ CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and A
 
 Contributions are welcome! Simple bug fixes with ready-to-merge code will likely be accepted. For larger changes or feature requests, consider forking — this gives you full control over the direction of your modifications.
 
-
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

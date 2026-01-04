@@ -101,7 +101,7 @@ func TranslateToGeminiCLI(cfg *config.Config, from sdktranslator.Format, model s
 	}
 
 	// Apply default thinking for models that require it (e.g., gemini-3-pro-preview)
-	geminiJSON = util.ApplyDefaultThinkingIfNeededCLI(model, geminiJSON)
+	geminiJSON = util.ApplyDefaultThinkingIfNeededCLI(model, metadata, geminiJSON)
 	geminiJSON = util.NormalizeGeminiCLIThinkingBudget(model, geminiJSON)
 
 	// Apply payload config overrides from YAML

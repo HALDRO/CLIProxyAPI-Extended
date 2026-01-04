@@ -178,6 +178,9 @@ func ParseGeminiChunkWithContext(rawJSON []byte, schemaCtx *ir.ToolSchemaContext
 						ThoughtSignature: ts,
 					})
 				}
+			} else if img := parseGeminiInlineImage(part); img != nil {
+				// Handle inline image in streaming response
+				events = append(events, ir.UnifiedEvent{Type: ir.EventTypeImage, Image: img, ThoughtSignature: ts})
 			} else if ts != "" {
 				// Part with only thought signature
 				events = append(events, ir.UnifiedEvent{Type: ir.EventTypeReasoning, Reasoning: "", ThoughtSignature: ts})
@@ -246,11 +249,23 @@ func parseGeminiMeta(parsed gjson.Result) *ir.ResponseMeta {
 func parseGeminiUsage(parsed gjson.Result) *ir.Usage {
 	u := parsed.Get("usageMetadata")
 	if !u.Exists() {
-		return nil
+		// Antigravity envelope may carry usage in cpaUsageMetadata.
+		u = parsed.Get("cpaUsageMetadata")
+		if !u.Exists() {
+			return nil
+		}
 	}
+
 	promptTokens := int(u.Get("promptTokenCount").Int())
 	thoughtsTokens := int(u.Get("thoughtsTokenCount").Int())
 	cachedTokens := int(u.Get("cachedContentTokenCount").Int())
+
+	// Adjust prompt tokens to exclude cached tokens.
+	promptTokens = promptTokens - cachedTokens
+	if promptTokens < 0 {
+		promptTokens = 0
+	}
+
 	return &ir.Usage{
 		PromptTokens:       promptTokens + thoughtsTokens,
 		CompletionTokens:   int(u.Get("candidatesTokenCount").Int()),
