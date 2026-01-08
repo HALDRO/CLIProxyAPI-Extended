@@ -20,6 +20,7 @@ import (
 
 	clineauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/cline"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/from_ir"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -237,8 +238,10 @@ func (e *ClineExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 
-		// State for new translator (tracks reasoning tokens)
-		streamState := &OpenAIStreamState{}
+		// State for new translator (tracks reasoning tokens and Claude state for Claude CLI)
+		streamState := &OpenAIStreamState{
+			ClaudeState: from_ir.NewClaudeStreamState(),
+		}
 		messageID := "chatcmpl-" + req.Model
 
 		// Cline executor uses ONLY new translator (no fallback)

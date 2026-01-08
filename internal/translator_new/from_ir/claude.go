@@ -32,18 +32,19 @@ type ClaudeProvider struct{}
 
 // ClaudeStreamState tracks state for streaming response conversion.
 type ClaudeStreamState struct {
-	MessageID           string
-	Model               string
-	SessionID           string
-	CurrentThinkingText strings.Builder
-	TextBlockIndex      int
-	ToolBlockCount      int
-	MessageStartSent    bool
-	TextBlockStarted    bool
-	TextBlockStopped    bool
-	HasToolCalls        bool
-	HasContent          bool
-	FinishSent          bool
+	MessageID             string
+	Model                 string
+	SessionID             string
+	CurrentThinkingText   strings.Builder
+	TextBlockIndex        int
+	ToolBlockCount        int
+	CurrentToolBlockIndex int
+	MessageStartSent      bool
+	TextBlockStarted      bool
+	TextBlockStopped      bool
+	HasToolCalls          bool
+	HasContent            bool
+	FinishSent            bool
 }
 
 func NewClaudeStreamState() *ClaudeStreamState {
@@ -262,14 +263,27 @@ func ToClaudeSSE(event ir.UnifiedEvent, model, messageID string, state *ClaudeSt
 	case ir.EventTypeToken:
 		result.WriteString(emitTextDelta(event.Content, state))
 	case ir.EventTypeReasoning:
-		if event.ThoughtSignature != "" {
-			result.WriteString(emitSignatureDelta(event.ThoughtSignature, state))
-		} else {
+		// Always emit thinking_delta for reasoning content
+		// ThoughtSignature like "xai-responses-v1" is a format identifier, not a cryptographic signature
+		// Real signatures are longer and used for verification (e.g., Claude's signature_delta)
+		if event.Reasoning != "" {
 			result.WriteString(emitThinkingDelta(event.Reasoning, state))
+		}
+		// Only emit signature_delta for real cryptographic signatures (not format identifiers)
+		// Real signatures are typically longer than 30 chars and don't contain common format patterns
+		if event.ThoughtSignature != "" && len(event.ThoughtSignature) > 30 &&
+			!strings.Contains(event.ThoughtSignature, "responses-v") &&
+			!strings.Contains(event.ThoughtSignature, "format") {
+			result.WriteString(emitSignatureDelta(event.ThoughtSignature, state))
 		}
 	case ir.EventTypeToolCall:
 		if event.ToolCall != nil {
 			result.WriteString(emitToolCall(event.ToolCall, state))
+		}
+	case ir.EventTypeToolCallDelta:
+		// Handle streaming tool call argument deltas
+		if event.ToolCall != nil && state != nil {
+			result.WriteString(emitToolCallDelta(event.ToolCall, state))
 		}
 	case ir.EventTypeFinish:
 		if state != nil && state.FinishSent {
@@ -458,6 +472,7 @@ func emitToolCall(tc *ir.ToolCall, state *ClaudeStreamState) string {
 		state.HasContent = true
 		idx = 1 + state.ToolBlockCount
 		state.ToolBlockCount++
+		state.CurrentToolBlockIndex = idx
 	}
 
 	result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStart, map[string]interface{}{
@@ -465,15 +480,48 @@ func emitToolCall(tc *ir.ToolCall, state *ClaudeStreamState) string {
 		"content_block": map[string]interface{}{"type": ir.ClaudeBlockToolUse, "id": tc.ID, "name": tc.Name, "input": map[string]interface{}{}},
 	}))
 
+	// Emit initial args delta if present
 	args := tc.Args
-	if args == "" {
-		args = "{}"
+	if args != "" {
+		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockDelta, map[string]interface{}{
+			"type": ir.ClaudeSSEContentBlockDelta, "index": idx,
+			"delta": map[string]interface{}{"type": "input_json_delta", "partial_json": args},
+		}))
 	}
-	result.WriteString(formatSSE(ir.ClaudeSSEContentBlockDelta, map[string]interface{}{
-		"type": ir.ClaudeSSEContentBlockDelta, "index": idx,
-		"delta": map[string]interface{}{"type": "input_json_delta", "partial_json": args},
-	}))
-	result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]interface{}{"type": ir.ClaudeSSEContentBlockStop, "index": idx}))
+
+	return result.String()
+}
+
+// emitToolCallDelta emits input_json_delta for streaming tool call arguments
+func emitToolCallDelta(tc *ir.ToolCall, state *ClaudeStreamState) string {
+	if tc == nil || state == nil {
+		return ""
+	}
+
+	idx := state.CurrentToolBlockIndex
+	if idx == 0 {
+		// No tool block started yet, skip delta
+		return ""
+	}
+
+	var result strings.Builder
+
+	// Emit args delta if present
+	if tc.Args != "" {
+		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockDelta, map[string]interface{}{
+			"type": ir.ClaudeSSEContentBlockDelta, "index": idx,
+			"delta": map[string]interface{}{"type": "input_json_delta", "partial_json": tc.Args},
+		}))
+	}
+
+	// Close the content block if complete
+	if tc.IsComplete {
+		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]interface{}{
+			"type": ir.ClaudeSSEContentBlockStop, "index": idx,
+		}))
+		state.CurrentToolBlockIndex = 0
+	}
+
 	return result.String()
 }
 

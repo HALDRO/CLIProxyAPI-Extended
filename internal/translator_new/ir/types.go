@@ -87,6 +87,7 @@ type ToolCall struct {
 	PartialArgs      string // Raw partial arguments (e.g. Gemini partialArgs)
 	ThoughtSignature string // Gemini thought signature for this tool call
 	IsCustom         bool   // True for custom tools (e.g., apply_patch with grammar format)
+	IsComplete       bool   // True when tool call streaming is complete (emit content_block_stop)
 }
 
 // ImagePart represents an image content part.

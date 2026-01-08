@@ -239,11 +239,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
-		// State for new translator (tracks reasoning tokens)
+		// State for new translator (tracks reasoning tokens and Claude state for Claude CLI)
 		var streamState *OpenAIStreamState
 		useNewTranslator := e.cfg != nil && e.cfg.UseCanonicalTranslator
 		if useNewTranslator {
-			streamState = &OpenAIStreamState{}
+			streamState = NewOpenAIStreamState()
 		}
 		messageID := "chatcmpl-" + req.Model
 		for scanner.Scan() {

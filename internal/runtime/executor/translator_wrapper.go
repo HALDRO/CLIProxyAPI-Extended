@@ -592,6 +592,9 @@ type OpenAIStreamState struct {
 	OutputIndexToToolIndex map[int]int
 	// NextToolCallIndex tracks the next available tool call index for Chat Completions format.
 	NextToolCallIndex int
+	// ClaudeState holds state for OpenAI → Claude streaming conversions.
+	// Used when Claude CLI sends requests through OpenAI-compatible providers (like Cline).
+	ClaudeState *from_ir.ClaudeStreamState
 }
 
 // NewOpenAIStreamState creates a new stream state for OpenAI provider.
@@ -601,6 +604,7 @@ func NewOpenAIStreamState() *OpenAIStreamState {
 		ToolCallSentHeader:     make(map[int]bool),
 		OutputIndexToToolIndex: make(map[int]int),
 		NextToolCallIndex:      0,
+		ClaudeState:            from_ir.NewClaudeStreamState(),
 	}
 }
 
@@ -851,9 +855,17 @@ func TranslateOpenAIResponseStreamForced(to sdktranslator.Format, openaiChunk []
 		// Convert OpenAI streaming chunks to Claude SSE format
 		// This is needed when Claude Code CLI sends requests through providers
 		// that use OpenAI-compatible APIs (like Cline)
-		claudeState := from_ir.NewClaudeStreamState()
-		claudeState.Model = model
-		claudeState.MessageID = messageID
+		var claudeState *from_ir.ClaudeStreamState
+		if state != nil && state.ClaudeState != nil {
+			claudeState = state.ClaudeState
+		} else {
+			claudeState = from_ir.NewClaudeStreamState()
+			claudeState.Model = model
+			claudeState.MessageID = messageID
+			if state != nil {
+				state.ClaudeState = claudeState
+			}
+		}
 
 		for _, event := range events {
 			chunkBytes, err := from_ir.ToClaudeSSE(event, model, messageID, claudeState)

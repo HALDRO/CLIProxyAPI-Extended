@@ -135,15 +135,18 @@ func (s *KiroStreamState) processToolEvent(parsed gjson.Result) []ir.UnifiedEven
 	}
 	s.CurrentToolInput += inputDelta
 
-	if isNewTool || inputDelta != "" {
-		tc := &ir.ToolCall{Args: inputDelta}
-		if isNewTool {
-			tc.ID = s.CurrentTool.ID
-			tc.Name = s.CurrentTool.Name
-		}
+	if isNewTool {
+		// First event for this tool - emit full ToolCall with ID and Name
 		events = append(events, ir.UnifiedEvent{
 			Type:          ir.EventTypeToolCall,
-			ToolCall:      tc,
+			ToolCall:      &ir.ToolCall{ID: id, Name: name, Args: inputDelta},
+			ToolCallIndex: toolIndex,
+		})
+	} else if inputDelta != "" {
+		// Subsequent events - emit delta only (no ID/Name needed)
+		events = append(events, ir.UnifiedEvent{
+			Type:          ir.EventTypeToolCallDelta,
+			ToolCall:      &ir.ToolCall{Args: inputDelta},
 			ToolCallIndex: toolIndex,
 		})
 	}
@@ -154,6 +157,12 @@ func (s *KiroStreamState) processToolEvent(parsed gjson.Result) []ir.UnifiedEven
 			s.CurrentTool.Args = "{}"
 		}
 		s.ToolCalls = append(s.ToolCalls, *s.CurrentTool)
+		// Emit completion event to close the content_block
+		events = append(events, ir.UnifiedEvent{
+			Type:          ir.EventTypeToolCallDelta,
+			ToolCall:      &ir.ToolCall{IsComplete: true},
+			ToolCallIndex: toolIndex,
+		})
 		s.CurrentTool = nil
 		s.CurrentToolInput = ""
 	}
