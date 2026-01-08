@@ -475,7 +475,7 @@ func MapFinishReasonToOpenAI(reason FinishReason) string {
 // MapStandardRole maps standard role strings to IR Role.
 func MapStandardRole(role string) Role {
 	switch role {
-	case "system":
+	case "system", "developer":
 		return RoleSystem
 	case "assistant":
 		return RoleAssistant

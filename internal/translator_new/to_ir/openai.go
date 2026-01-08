@@ -167,7 +167,7 @@ func parseResponsesAPIFields(root gjson.Result, req *ir.UnifiedChatRequest) {
 			for _, item := range input.Array() {
 				// Check if this is a system message in input[] (invalid format)
 				role := item.Get("role").String()
-				if role == "system" {
+				if role == "system" || role == "developer" {
 					// Extract system message content and add to instructions
 					content := item.Get("content")
 					var text string

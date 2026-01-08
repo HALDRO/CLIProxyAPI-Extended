@@ -242,6 +242,7 @@ func (p *GeminiProvider) applyUserMessage(contents *[]interface{}, msg ir.Messag
 						"mimeType": part.Image.MimeType,
 						"data":     part.Image.Data,
 					},
+					"thoughtSignature": "skip_thought_signature_validator",
 				})
 			}
 		}
@@ -292,6 +293,7 @@ func (p *GeminiProvider) applyAssistantText(contents *[]interface{}, msg ir.Mess
 						"mimeType": part.Image.MimeType,
 						"data":     part.Image.Data,
 					},
+					"thoughtSignature": "skip_thought_signature_validator",
 				})
 			}
 		}

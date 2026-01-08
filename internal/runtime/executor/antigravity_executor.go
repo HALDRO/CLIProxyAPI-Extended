@@ -48,6 +48,7 @@ const (
 	defaultAntigravityAgent        = "antigravity/1.104.0 darwin/arm64"
 	antigravityAuthType            = "antigravity"
 	refreshSkew                    = 3000 * time.Second
+	systemInstruction              = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"
 )
 
 // Note: We use crypto/rand via uuid package for thread-safe random generation
@@ -78,7 +79,7 @@ func (e *AntigravityExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.Au
 // Execute performs a non-streaming request to the Antigravity API.
 func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	isClaude := strings.Contains(strings.ToLower(req.Model), "claude")
-	if isClaude {
+	if isClaude || strings.Contains(req.Model, "gemini-3-pro") {
 		return e.executeClaudeNonStream(ctx, auth, req, opts)
 	}
 
@@ -564,6 +565,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	defer reporter.trackFailure(ctx, &err)
 
 	isClaude := strings.Contains(strings.ToLower(req.Model), "claude")
+	isGemini3Pro := strings.Contains(req.Model, "gemini-3-pro")
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("antigravity")
@@ -589,7 +591,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	translated = ApplyThinkingMetadataCLI(translated, req.Metadata, req.Model)
 	translated = util.ApplyGemini3ThinkingLevelFromMetadataCLI(req.Model, req.Metadata, translated)
 	translated = util.ApplyDefaultThinkingIfNeededCLI(req.Model, req.Metadata, translated)
-	translated = normalizeAntigravityThinking(req.Model, translated, isClaude)
+	translated = normalizeAntigravityThinking(req.Model, translated, isClaude || isGemini3Pro)
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, "antigravity", "request", translated, originalTranslated)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
@@ -1008,7 +1010,13 @@ func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *clipr
 	if accessToken != "" && expiry.After(time.Now().Add(refreshSkew)) {
 		return accessToken, nil, nil
 	}
-	updated, errRefresh := e.refreshToken(ctx, auth.Clone())
+	refreshCtx := context.Background()
+	if ctx != nil {
+		if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
+			refreshCtx = context.WithValue(refreshCtx, "cliproxy.roundtripper", rt)
+		}
+	}
+	updated, errRefresh := e.refreshToken(refreshCtx, auth.Clone())
 	if errRefresh != nil {
 		return "", nil, errRefresh
 	}
@@ -1133,6 +1141,20 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		strJSON = util.CleanJSONSchemaForAntigravity(strJSON)
 
 		payload = []byte(strJSON)
+	}
+
+	// Inject systemInstruction for Claude and Gemini-3-Pro models
+	if strings.Contains(modelName, "claude") || strings.Contains(modelName, "gemini-3-pro-preview") {
+		systemInstructionPartsResult := gjson.GetBytes(payload, "request.systemInstruction.parts")
+		payload, _ = sjson.SetBytes(payload, "request.systemInstruction.role", "user")
+		payload, _ = sjson.SetBytes(payload, "request.systemInstruction.parts.0.text", systemInstruction)
+		payload, _ = sjson.SetBytes(payload, "request.systemInstruction.parts.1.text", fmt.Sprintf("Please ignore following [ignore]%s[/ignore]", systemInstruction))
+
+		if systemInstructionPartsResult.Exists() && systemInstructionPartsResult.IsArray() {
+			for _, partResult := range systemInstructionPartsResult.Array() {
+				payload, _ = sjson.SetRawBytes(payload, "request.systemInstruction.parts.-1", []byte(partResult.Raw))
+			}
+		}
 	}
 
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bytes.NewReader(payload))
