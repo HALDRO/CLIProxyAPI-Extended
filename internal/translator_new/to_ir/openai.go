@@ -819,7 +819,7 @@ func parseOpenAITool(t gjson.Result) *ir.ToolDefinition {
 		// The tool input is passed as raw text, not structured JSON
 		name, description = t.Get("name").String(), t.Get("description").String()
 		isCustomTool = true
-	default:
+	case "":
 		// Fallback for tools without explicit type
 		if t.Get("name").Exists() {
 			name, description = t.Get("name").String(), t.Get("description").String()
@@ -830,6 +830,10 @@ func parseOpenAITool(t gjson.Result) *ir.ToolDefinition {
 				paramsResult = t.Get("input_schema")
 			}
 		}
+	default:
+		// Built-in tools (e.g., web_search, code_interpreter) - pass through as-is
+		// These tools are handled natively by the API and don't need parameter conversion
+		return &ir.ToolDefinition{Name: toolType, IsBuiltIn: true}
 	}
 
 	if name == "" {

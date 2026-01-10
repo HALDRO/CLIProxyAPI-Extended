@@ -139,6 +139,7 @@ type ToolDefinition struct {
 	Parameters  map[string]interface{} // JSON Schema object (cleaned)
 	Format      map[string]interface{} // Grammar format for custom tools (e.g., apply_patch)
 	IsCustom    bool                   // True for custom/freeform tools that use raw text input
+	IsBuiltIn   bool                   // True for built-in tools (e.g., web_search) that pass through as-is
 }
 
 // ThinkingConfig controls the reasoning capabilities of the model.

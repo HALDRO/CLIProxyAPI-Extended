@@ -166,6 +166,11 @@ func convertToResponsesAPIRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 func buildOpenAITools(tools []ir.ToolDefinition) []interface{} {
 	res := make([]interface{}, len(tools))
 	for i, t := range tools {
+		// Built-in tools (e.g., web_search, code_interpreter) - pass through as-is
+		if t.IsBuiltIn {
+			res[i] = map[string]interface{}{"type": t.Name}
+			continue
+		}
 		params := t.Parameters
 		if params == nil {
 			params = map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
@@ -185,6 +190,11 @@ func buildOpenAITools(tools []ir.ToolDefinition) []interface{} {
 func buildResponsesTools(tools []ir.ToolDefinition) []interface{} {
 	res := make([]interface{}, len(tools))
 	for i, t := range tools {
+		// Built-in tools (e.g., web_search, code_interpreter) - pass through as-is
+		if t.IsBuiltIn {
+			res[i] = map[string]interface{}{"type": t.Name}
+			continue
+		}
 		// Custom/freeform tools (e.g., apply_patch) have IsCustom=true or nil Parameters
 		// These tools accept raw text input, not structured JSON
 		if t.IsCustom || t.Parameters == nil {
