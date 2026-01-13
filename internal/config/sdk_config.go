@@ -36,6 +36,10 @@ type SDKConfig struct {
 	// rewritten to the target model. This works across all providers and endpoints.
 	// Example: "gpt-4" -> "claude-sonnet-4" routes all gpt-4 requests to Claude.
 	ModelAliases []ModelAlias `yaml:"model-aliases,omitempty" json:"model-aliases,omitempty"`
+
+	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
+	// <= 0 disables keep-alives. Value is in seconds.
+	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
 }
 
 // ModelAlias defines a single model name alias mapping.

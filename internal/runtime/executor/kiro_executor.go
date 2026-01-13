@@ -98,6 +98,27 @@ func NewKiroExecutor(cfg *config.Config) *KiroExecutor {
 
 func (e *KiroExecutor) Identifier() string { return constant.Kiro }
 
+// PrepareRequest prepares the HTTP request with necessary headers and authentication.
+func (e *KiroExecutor) PrepareRequest(_ *http.Request, _ *coreauth.Auth) error {
+	return nil
+}
+
+// HttpRequest executes an HTTP request with Kiro credentials.
+func (e *KiroExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
+	if req == nil {
+		return nil, fmt.Errorf("kiro executor: request is nil")
+	}
+	if ctx == nil {
+		ctx = req.Context()
+	}
+	httpReq := req.WithContext(ctx)
+	if err := e.PrepareRequest(httpReq, auth); err != nil {
+		return nil, err
+	}
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	return httpClient.Do(httpReq)
+}
+
 // isJWTExpired checks if a JWT access token has expired.
 // Optimized: extracts exp claim without full JSON unmarshal when possible.
 func isJWTExpired(token string) bool {
