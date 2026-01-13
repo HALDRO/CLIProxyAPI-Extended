@@ -39,8 +39,26 @@ func ParseKiroResponse(rawJSON []byte) ([]ir.Message, *ir.Usage, error) {
 	}
 
 	msg := &ir.Message{Role: ir.RoleAssistant}
+
+	// Parse content with thinking tag extraction
 	if content := resp.Get("content").String(); content != "" {
-		msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: content})
+		cleanContent, thinkingContent := extractThinkingFromContent(content)
+
+		// Add thinking content first (if any)
+		if thinkingContent != "" {
+			msg.Content = append(msg.Content, ir.ContentPart{
+				Type:      ir.ContentTypeReasoning,
+				Reasoning: thinkingContent,
+			})
+		}
+
+		// Add regular text content
+		if cleanContent != "" {
+			msg.Content = append(msg.Content, ir.ContentPart{
+				Type: ir.ContentTypeText,
+				Text: cleanContent,
+			})
+		}
 	}
 
 	for _, tool := range resp.Get("toolUsages").Array() {
@@ -57,17 +75,71 @@ func ParseKiroResponse(rawJSON []byte) ([]ir.Message, *ir.Usage, error) {
 	return []ir.Message{*msg}, nil, nil
 }
 
-// KiroStreamState tracks state for Kiro streaming response parsing.
-type KiroStreamState struct {
-	Usage              *ir.Usage
-	CurrentTool        *ir.ToolCall
-	AccumulatedContent string
-	CurrentToolInput   string
-	ToolCalls          []ir.ToolCall
+// extractThinkingFromContent parses content to extract thinking blocks and text.
+// Returns (cleanContent, thinkingContent).
+func extractThinkingFromContent(content string) (string, string) {
+	if !strings.Contains(content, kiroThinkingStartTag) {
+		return content, ""
+	}
+
+	var cleanContent strings.Builder
+	var thinkingContent strings.Builder
+	remaining := content
+
+	for len(remaining) > 0 {
+		startIdx := strings.Index(remaining, kiroThinkingStartTag)
+		if startIdx < 0 {
+			// No more thinking tags, add remaining as text
+			cleanContent.WriteString(remaining)
+			break
+		}
+
+		// Add text before thinking tag
+		if startIdx > 0 {
+			cleanContent.WriteString(remaining[:startIdx])
+		}
+
+		// Move past the opening tag
+		remaining = remaining[startIdx+len(kiroThinkingStartTag):]
+
+		// Find closing tag
+		endIdx := strings.Index(remaining, kiroThinkingEndTag)
+		if endIdx < 0 {
+			// No closing tag found, treat rest as thinking content
+			thinkingContent.WriteString(remaining)
+			break
+		}
+
+		// Extract thinking content between tags
+		thinkingContent.WriteString(remaining[:endIdx])
+		remaining = remaining[endIdx+len(kiroThinkingEndTag):]
+	}
+
+	return strings.TrimSpace(cleanContent.String()), strings.TrimSpace(thinkingContent.String())
 }
 
+// KiroStreamState tracks state for Kiro streaming response parsing.
+type KiroStreamState struct {
+	Usage               *ir.Usage
+	CurrentTool         *ir.ToolCall
+	AccumulatedContent  string
+	CurrentToolInput    string
+	ToolCalls           []ir.ToolCall
+	InThinkingBlock     bool   // Whether we're currently inside a <thinking> block
+	AccumulatedThinking string // Accumulated thinking content
+}
+
+// Kiro thinking tag constants
+const (
+	kiroThinkingStartTag = "<thinking>"
+	kiroThinkingEndTag   = "</thinking>"
+)
+
 func NewKiroStreamState() *KiroStreamState {
-	return &KiroStreamState{ToolCalls: make([]ir.ToolCall, 0)}
+	return &KiroStreamState{
+		ToolCalls:       make([]ir.ToolCall, 0),
+		InThinkingBlock: false,
+	}
 }
 
 // ProcessChunk processes a Kiro stream chunk and returns events.
@@ -81,6 +153,11 @@ func (s *KiroStreamState) ProcessChunk(rawJSON []byte) ([]ir.UnifiedEvent, error
 	parsed := gjson.ParseBytes(rawJSON)
 
 	s.parseUsage(parsed)
+
+	// Handle reasoningContentEvent (official Kiro thinking mode)
+	if reasoningEvents := s.processReasoningEvent(parsed); len(reasoningEvents) > 0 {
+		return reasoningEvents, nil
+	}
 
 	if parsed.Get("toolUseId").Exists() && parsed.Get("name").Exists() {
 		return s.processToolEvent(parsed), nil
@@ -178,20 +255,10 @@ func (s *KiroStreamState) processRegularEvents(parsed gjson.Result) []ir.Unified
 	}
 
 	if content := data.Get("content").String(); content != "" {
-		cleanContent, embeddedTools := ParseEmbeddedToolCalls(content)
-
-		if cleanContent != "" {
-			s.AccumulatedContent += cleanContent
-			events = append(events, ir.UnifiedEvent{Type: ir.EventTypeToken, Content: cleanContent})
-		}
-
-		for _, tc := range embeddedTools {
-			if !s.hasToolCall(tc.ID) {
-				s.ToolCalls = append(s.ToolCalls, tc)
-				tcCopy := tc
-				events = append(events, ir.UnifiedEvent{Type: ir.EventTypeToolCall, ToolCall: &tcCopy})
-			}
-		}
+		// Process content with thinking tag parsing
+		textEvents, thinkingEvents := s.processContentWithThinking(content)
+		events = append(events, thinkingEvents...)
+		events = append(events, textEvents...)
 	}
 
 	for _, tool := range data.Get("toolUsages").Array() {
@@ -206,6 +273,134 @@ func (s *KiroStreamState) processRegularEvents(parsed gjson.Result) []ir.Unified
 		}
 	}
 	return events
+}
+
+// processReasoningEvent handles official reasoningContentEvent from Kiro API.
+// When thinking_mode is enabled, Kiro returns reasoning as dedicated events
+// rather than inline <thinking> tags.
+func (s *KiroStreamState) processReasoningEvent(parsed gjson.Result) []ir.UnifiedEvent {
+	var events []ir.UnifiedEvent
+
+	// Check for reasoningContentEvent (official Kiro thinking mode)
+	if reasoning := parsed.Get("reasoningContentEvent"); reasoning.Exists() {
+		content := reasoning.Get("content").String()
+		if content != "" {
+			s.AccumulatedThinking += content
+			events = append(events, ir.UnifiedEvent{
+				Type:      ir.EventTypeReasoning,
+				Reasoning: content,
+			})
+		}
+		return events
+	}
+
+	// Also check direct reasoningContent field
+	if reasoning := parsed.Get("reasoningContent"); reasoning.Exists() {
+		content := reasoning.String()
+		if content != "" {
+			s.AccumulatedThinking += content
+			events = append(events, ir.UnifiedEvent{
+				Type:      ir.EventTypeReasoning,
+				Reasoning: content,
+			})
+		}
+		return events
+	}
+
+	return nil
+}
+
+// processContentWithThinking parses content for <thinking> tags and separates
+// thinking content from regular text content.
+// Returns (textEvents, thinkingEvents).
+func (s *KiroStreamState) processContentWithThinking(content string) ([]ir.UnifiedEvent, []ir.UnifiedEvent) {
+	var textEvents, thinkingEvents []ir.UnifiedEvent
+
+	remaining := content
+
+	for len(remaining) > 0 {
+		if s.InThinkingBlock {
+			// We're inside a thinking block, look for </thinking>
+			endIdx := strings.Index(remaining, kiroThinkingEndTag)
+			if endIdx >= 0 {
+				// Found end tag - emit thinking content before the tag
+				thinkingText := remaining[:endIdx]
+				if thinkingText != "" {
+					s.AccumulatedThinking += thinkingText
+					thinkingEvents = append(thinkingEvents, ir.UnifiedEvent{
+						Type:      ir.EventTypeReasoning,
+						Reasoning: thinkingText,
+					})
+				}
+				s.InThinkingBlock = false
+				remaining = remaining[endIdx+len(kiroThinkingEndTag):]
+			} else {
+				// No end tag found - all remaining content is thinking
+				if remaining != "" {
+					s.AccumulatedThinking += remaining
+					thinkingEvents = append(thinkingEvents, ir.UnifiedEvent{
+						Type:      ir.EventTypeReasoning,
+						Reasoning: remaining,
+					})
+				}
+				break
+			}
+		} else {
+			// We're outside a thinking block, look for <thinking>
+			startIdx := strings.Index(remaining, kiroThinkingStartTag)
+			if startIdx >= 0 {
+				// Found start tag - emit text content before the tag
+				textBefore := remaining[:startIdx]
+				if textBefore != "" {
+					cleanContent, embeddedTools := ParseEmbeddedToolCalls(textBefore)
+					if cleanContent != "" {
+						s.AccumulatedContent += cleanContent
+						textEvents = append(textEvents, ir.UnifiedEvent{
+							Type:    ir.EventTypeToken,
+							Content: cleanContent,
+						})
+					}
+					for _, tc := range embeddedTools {
+						if !s.hasToolCall(tc.ID) {
+							s.ToolCalls = append(s.ToolCalls, tc)
+							tcCopy := tc
+							textEvents = append(textEvents, ir.UnifiedEvent{
+								Type:     ir.EventTypeToolCall,
+								ToolCall: &tcCopy,
+							})
+						}
+					}
+				}
+				s.InThinkingBlock = true
+				remaining = remaining[startIdx+len(kiroThinkingStartTag):]
+			} else {
+				// No start tag found - all remaining content is regular text
+				if remaining != "" {
+					cleanContent, embeddedTools := ParseEmbeddedToolCalls(remaining)
+					if cleanContent != "" {
+						s.AccumulatedContent += cleanContent
+						textEvents = append(textEvents, ir.UnifiedEvent{
+							Type:    ir.EventTypeToken,
+							Content: cleanContent,
+						})
+					}
+					for _, tc := range embeddedTools {
+						if !s.hasToolCall(tc.ID) {
+							s.ToolCalls = append(s.ToolCalls, tc)
+							tcCopy := tc
+							textEvents = append(textEvents, ir.UnifiedEvent{
+								Type:     ir.EventTypeToolCall,
+								ToolCall: &tcCopy,
+							})
+						}
+					}
+				}
+				break
+			}
+		}
+	}
+
+	return textEvents, thinkingEvents
 }
 
 func (s *KiroStreamState) hasToolCall(id string) bool {

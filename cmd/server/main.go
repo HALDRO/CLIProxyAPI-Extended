@@ -79,6 +79,7 @@ func main() {
 	var kiroLogin bool
 	var kiroGoogleLogin bool
 	var kiroAWSLogin bool
+	var kiroAWSAuthCode bool
 	var kiroImport bool
 	var githubCopilotLogin bool
 	var projectID string
@@ -103,6 +104,7 @@ func main() {
 	flag.BoolVar(&kiroLogin, "kiro-login", false, "Login to Kiro using Google OAuth")
 	flag.BoolVar(&kiroGoogleLogin, "kiro-google-login", false, "Login to Kiro using Google OAuth (same as --kiro-login)")
 	flag.BoolVar(&kiroAWSLogin, "kiro-aws-login", false, "Login to Kiro using AWS Builder ID (device code flow)")
+	flag.BoolVar(&kiroAWSAuthCode, "kiro-aws-authcode", false, "Login to Kiro using AWS Builder ID (authorization code flow, better UX)")
 	flag.BoolVar(&kiroImport, "kiro-import", false, "Import Kiro token from Kiro IDE (~/.aws/sso/cache/kiro-auth-token.json)")
 	flag.BoolVar(&githubCopilotLogin, "copilot-login", false, "Login to Copilot using device flow")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
@@ -511,6 +513,10 @@ func main() {
 		// Users can explicitly override with --no-incognito
 		setKiroIncognitoMode(cfg, useIncognito, noIncognito)
 		cmd.DoKiroAWSLogin(cfg, options)
+	} else if kiroAWSAuthCode {
+		// For Kiro auth with authorization code flow (better UX)
+		setKiroIncognitoMode(cfg, useIncognito, noIncognito)
+		cmd.DoKiroAWSAuthCodeLogin(cfg, options)
 	} else if kiroImport {
 		cmd.DoKiroImport(cfg, options)
 	} else {

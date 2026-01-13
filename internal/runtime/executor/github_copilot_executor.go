@@ -63,21 +63,33 @@ func NewGitHubCopilotExecutor(cfg *config.Config) *GitHubCopilotExecutor {
 func (e *GitHubCopilotExecutor) Identifier() string { return githubCopilotAuthType }
 
 // PrepareRequest implements ProviderExecutor.
-func (e *GitHubCopilotExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.Auth) error {
+func (e *GitHubCopilotExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
+	if req == nil {
+		return nil
+	}
+	ctx := req.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	apiToken, errToken := e.ensureAPIToken(ctx, auth)
+	if errToken != nil {
+		return errToken
+	}
+	e.applyHeaders(req, apiToken)
 	return nil
 }
 
-// HttpRequest executes an HTTP request with GitHub Copilot credentials.
+// HttpRequest injects GitHub Copilot credentials into the request and executes it.
 func (e *GitHubCopilotExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
 	if req == nil {
-		return nil, fmt.Errorf("github copilot executor: request is nil")
+		return nil, fmt.Errorf("github-copilot executor: request is nil")
 	}
 	if ctx == nil {
 		ctx = req.Context()
 	}
 	httpReq := req.WithContext(ctx)
-	if err := e.PrepareRequest(httpReq, auth); err != nil {
-		return nil, err
+	if errPrepare := e.PrepareRequest(httpReq, auth); errPrepare != nil {
+		return nil, errPrepare
 	}
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	return httpClient.Do(httpReq)
@@ -95,14 +107,11 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
-
-	// Prepare original payload for payload config comparison
 	originalPayload := bytes.Clone(req.Payload)
 	if len(opts.OriginalRequest) > 0 {
 		originalPayload = bytes.Clone(opts.OriginalRequest)
 	}
 	originalTranslated := sdktranslator.TranslateRequest(from, to, req.Model, originalPayload, false)
-
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
 	body = e.normalizeModel(req.Model, body)
 	body = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", body, originalTranslated)
@@ -186,14 +195,11 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
-
-	// Prepare original payload for payload config comparison
 	originalPayload := bytes.Clone(req.Payload)
 	if len(opts.OriginalRequest) > 0 {
 		originalPayload = bytes.Clone(opts.OriginalRequest)
 	}
-	originalTranslated := sdktranslator.TranslateRequest(from, to, req.Model, originalPayload, true)
-
+	originalTranslated := sdktranslator.TranslateRequest(from, to, req.Model, originalPayload, false)
 	body := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), true)
 	body = e.normalizeModel(req.Model, body)
 	body = applyPayloadConfigWithRoot(e.cfg, req.Model, to.String(), "", body, originalTranslated)

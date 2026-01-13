@@ -49,6 +49,27 @@ func (w *Watcher) start(ctx context.Context) error {
 	return nil
 }
 
+func (w *Watcher) watchKiroIDETokenFile() {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		log.Debugf("failed to get home directory for Kiro IDE token watch: %v", err)
+		return
+	}
+
+	kiroTokenDir := filepath.Join(homeDir, ".aws", "sso", "cache")
+
+	if _, statErr := os.Stat(kiroTokenDir); os.IsNotExist(statErr) {
+		log.Debugf("Kiro IDE token directory does not exist: %s", kiroTokenDir)
+		return
+	}
+
+	if errAdd := w.watcher.Add(kiroTokenDir); errAdd != nil {
+		log.Debugf("failed to watch Kiro IDE token directory %s: %v", kiroTokenDir, errAdd)
+		return
+	}
+	log.Debugf("watching Kiro IDE token directory: %s", kiroTokenDir)
+}
+
 func (w *Watcher) processEvents(ctx context.Context) {
 	for {
 		select {
@@ -77,15 +98,15 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	isConfigEvent := normalizedName == normalizedConfigPath && event.Op&configOps != 0
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
 	isAuthJSON := strings.HasPrefix(normalizedName, normalizedAuthDir) && strings.HasSuffix(normalizedName, ".json") && event.Op&authOps != 0
-	isKiroToken := isKiroIDETokenFile(event.Name) && event.Op&authOps != 0
-	if !isConfigEvent && !isAuthJSON && !isKiroToken {
+	isKiroIDEToken := w.isKiroIDETokenFile(event.Name) && event.Op&authOps != 0
+	if !isConfigEvent && !isAuthJSON && !isKiroIDEToken {
 		// Ignore unrelated files (e.g., cookie snapshots *.cookie) and other noise.
 		return
 	}
 
 	// Handle Kiro IDE token file changes
-	if isKiroToken {
-		w.handleKiroIDETokenChange()
+	if isKiroIDEToken {
+		w.handleKiroIDETokenChange(event)
 		return
 	}
 
@@ -132,6 +153,42 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		}
 		log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
 		w.addOrUpdateClient(event.Name)
+	}
+}
+
+func (w *Watcher) isKiroIDETokenFile(path string) bool {
+	normalized := filepath.ToSlash(path)
+	return strings.HasSuffix(normalized, "kiro-auth-token.json") && strings.Contains(normalized, ".aws/sso/cache")
+}
+
+func (w *Watcher) handleKiroIDETokenChange(event fsnotify.Event) {
+	log.Debugf("Kiro IDE token file event detected: %s %s", event.Op.String(), event.Name)
+
+	if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+		time.Sleep(replaceCheckDelay)
+		if _, statErr := os.Stat(event.Name); statErr != nil {
+			log.Debugf("Kiro IDE token file removed: %s", event.Name)
+			return
+		}
+	}
+
+	tokenData, err := kiroauth.LoadKiroIDEToken()
+	if err != nil {
+		log.Debugf("failed to load Kiro IDE token after change: %v", err)
+		return
+	}
+
+	log.Infof("Kiro IDE token file updated, access token refreshed (provider: %s)", tokenData.Provider)
+
+	w.refreshAuthState(true)
+
+	w.clientsMutex.RLock()
+	cfg := w.config
+	w.clientsMutex.RUnlock()
+
+	if w.reloadCallback != nil && cfg != nil {
+		log.Debugf("triggering server update callback after Kiro IDE token change")
+		w.reloadCallback(cfg)
 	}
 }
 
@@ -202,39 +259,4 @@ func (w *Watcher) shouldDebounceRemove(normalizedPath string, now time.Time) boo
 	}
 	w.clientsMutex.Unlock()
 	return false
-}
-
-// watchKiroIDETokenFile adds the Kiro IDE token directory to the watcher.
-func (w *Watcher) watchKiroIDETokenFile() {
-	tokenPath := kiroauth.GetKiroIDETokenPath()
-	if tokenPath == "" {
-		return
-	}
-	tokenDir := filepath.Dir(tokenPath)
-	if _, err := os.Stat(tokenDir); os.IsNotExist(err) {
-		// Directory doesn't exist yet, skip watching
-		return
-	}
-	if err := w.watcher.Add(tokenDir); err != nil {
-		log.Debugf("failed to watch Kiro IDE token directory %s: %v", tokenDir, err)
-		return
-	}
-	log.Debugf("watching Kiro IDE token directory: %s", tokenDir)
-}
-
-// isKiroIDETokenFile checks if the given path is the Kiro IDE token file.
-func isKiroIDETokenFile(path string) bool {
-	tokenPath := kiroauth.GetKiroIDETokenPath()
-	if tokenPath == "" {
-		return false
-	}
-	normalizedPath := filepath.Clean(path)
-	normalizedTokenPath := filepath.Clean(tokenPath)
-	return strings.EqualFold(normalizedPath, normalizedTokenPath)
-}
-
-// handleKiroIDETokenChange processes changes to the Kiro IDE token file.
-func (w *Watcher) handleKiroIDETokenChange() {
-	log.Debug("Kiro IDE token file changed, reloading clients")
-	w.reloadClients(false, nil, false)
 }

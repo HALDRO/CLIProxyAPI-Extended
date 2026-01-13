@@ -34,6 +34,7 @@ import (
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/antigravity/openai/chat-completions"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/antigravity/openai/responses"
 
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/claude"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/openai/chat-completions"
+	// Kiro translator removed - now using Canonical IR architecture (translator_new)
+	// _ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/claude"
+	// _ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/openai"
 )

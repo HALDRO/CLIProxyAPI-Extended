@@ -7,6 +7,7 @@ package from_ir
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
@@ -20,6 +21,13 @@ func (p *KiroProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, error
 	origin := extractOrigin(req)
 	tools := extractTools(req.Tools)
 	systemPrompt := extractSystemPrompt(req.Messages)
+
+	// Inject thinking mode configuration if enabled
+	// Kiro API supports official thinking/reasoning mode via <thinking_mode> tag.
+	// When set to "enabled", Kiro returns reasoning content as official reasoningContentEvent
+	// rather than inline <thinking> tags in assistantResponseEvent.
+	systemPrompt = injectThinkingMode(req.Thinking, systemPrompt)
+
 	history, currentMessage := processMessages(req.Messages, tools, req.Model, origin)
 
 	injectSystemPrompt(systemPrompt, &history, currentMessage, req.Model, origin)
@@ -352,3 +360,48 @@ func injectSystemPrompt(prompt string, history *[]interface{}, currentMessage ma
 		},
 	}}, *history...)
 }
+
+// injectThinkingMode adds thinking mode configuration to the system prompt if enabled.
+// Kiro API supports official thinking/reasoning mode via <thinking_mode> tag.
+// When set to "enabled", Kiro returns reasoning content as official reasoningContentEvent.
+// Supports multiple detection methods:
+// - ThinkingConfig.IncludeThoughts = true
+// - ThinkingConfig.Budget > 0 or Budget == -1 (auto)
+// - ThinkingConfig.Effort != "" and != "none"
+func injectThinkingMode(thinking *ir.ThinkingConfig, systemPrompt string) string {
+	if thinking == nil {
+		return systemPrompt
+	}
+
+	// Determine if thinking should be enabled
+	thinkingEnabled := thinking.IncludeThoughts ||
+		thinking.Budget > 0 ||
+		thinking.Budget == -1 ||
+		(thinking.Effort != "" && thinking.Effort != "none")
+
+	if !thinkingEnabled {
+		return systemPrompt
+	}
+
+	// Determine max thinking length based on budget
+	// Default to 200000 tokens for extensive reasoning
+	maxThinkingLength := 200000
+	if thinking.Budget > 0 {
+		maxThinkingLength = thinking.Budget
+	}
+
+	// Build thinking mode hint
+	thinkingHint := "<thinking_mode>enabled</thinking_mode>\n<max_thinking_length>" +
+		strconv.Itoa(maxThinkingLength) + "</max_thinking_length>"
+
+	if systemPrompt != "" {
+		return thinkingHint + "\n\n" + systemPrompt
+	}
+	return thinkingHint
+}
+
+// Kiro thinking tag constants for response parsing
+const (
+	KiroThinkingStartTag = "<thinking>"
+	KiroThinkingEndTag   = "</thinking>"
+)

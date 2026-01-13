@@ -1241,7 +1241,8 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		}
 		return result
 
-	case "claude":
+	case "claude", "kiro", "antigravity":
+		// Claude, Kiro, and Antigravity all use Claude-compatible format for Claude Code client
 		result := map[string]any{
 			"id":       prefix + model.ID,
 			"object":   "model",
@@ -1255,6 +1256,19 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		}
 		if model.DisplayName != "" {
 			result["display_name"] = model.DisplayName
+		}
+		// Add thinking support for Claude Code client
+		// Claude Code checks for "thinking" field (simple boolean) to enable tab toggle
+		// Also add "extended_thinking" for detailed budget info
+		if model.Thinking != nil {
+			result["thinking"] = true
+			result["extended_thinking"] = map[string]any{
+				"supported":       true,
+				"min":             model.Thinking.Min,
+				"max":             model.Thinking.Max,
+				"zero_allowed":    model.Thinking.ZeroAllowed,
+				"dynamic_allowed": model.Thinking.DynamicAllowed,
+			}
 		}
 		return result
 
