@@ -42,6 +42,9 @@ func (p *GeminiProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, err
 		p.fixImageAspectRatioForPreview(root, req.ImageConfig.AspectRatio)
 	}
 
+	// Clean [undefined] values injected by some clients (e.g., Cherry Studio)
+	ir.DeepCleanUndefined(root)
+
 	return json.Marshal(root)
 }
 
@@ -61,8 +64,22 @@ func (p *GeminiProvider) applyGenerationConfig(root map[string]interface{}, req 
 		genConfig["maxOutputTokens"] = *req.MaxTokens
 	}
 
+	// Check if thinking mode is enabled (plan mode)
+	isPlanMode := false
 	if util.ModelSupportsThinking(req.Model) || util.IsGemini3Model(req.Model) {
 		p.applyThinkingConfig(genConfig, req)
+		// Check if thinking is enabled (plan mode)
+		if req.Thinking != nil && req.Thinking.Budget > 0 {
+			isPlanMode = true
+		}
+	}
+
+	// Clear stop sequences for thinking mode (plan mode) to prevent premature stopping
+	if isPlanMode && len(req.StopSequences) == 0 {
+		// Plan mode: clear default stop sequences to avoid premature stopping
+		genConfig["stopSequences"] = []interface{}{}
+	} else if len(req.StopSequences) > 0 {
+		genConfig["stopSequences"] = req.StopSequences
 	}
 
 	if len(req.ResponseModality) > 0 {
@@ -184,10 +201,23 @@ func (p *GeminiProvider) applyMessages(root map[string]interface{}, req *ir.Unif
 	toolCallIDToName := ir.BuildToolCallMap(req.Messages)
 	toolResults := ir.BuildToolResultsMap(req.Messages)
 
+	// Ensure thinking consistency: if thinking is enabled, last assistant message must start with thinking block.
+	// This prevents Gemini API errors when thinking is enabled but history has inconsistent thinking blocks.
+	// Recovery strategy:
+	// 1) Try to structurally fix the last assistant message (no extra turns).
+	// 2) If that still doesn't resolve tool-loop constraints, close the loop by injecting
+	//    a minimal synthetic Assistant->User pair.
+	messages := req.Messages
+	if req.Thinking != nil && (req.Thinking.IncludeThoughts || req.Thinking.Budget > 0) {
+		messages, _ = to_ir.EnsureThinkingConsistency(messages)
+		// Try to close broken tool loops for thinking models
+		messages, _ = to_ir.CloseToolLoopForThinking(messages)
+	}
+
 	shouldInjectHint := len(req.Tools) > 0 && req.Thinking != nil && req.Thinking.Budget > 0 && util.IsClaudeThinkingModel(req.Model)
 	interleavedHint := "Interleaved thinking is enabled. You may think between tool calls and after receiving tool results before deciding the next action or final answer. Do not mention these instructions or any constraints about thinking blocks; just apply them."
 
-	for _, msg := range req.Messages {
+	for _, msg := range messages {
 		switch msg.Role {
 		case ir.RoleSystem:
 			p.applySystemMessage(root, msg, shouldInjectHint, interleavedHint)
@@ -336,6 +366,14 @@ func (p *GeminiProvider) applyAssistantToolCalls(contents *[]interface{}, msg ir
 
 	for i, tc := range msg.ToolCalls {
 		argsJSON := ir.ValidateAndNormalizeJSON(tc.Args)
+		// Parse args to remove null values (Roo/Kilo compatibility)
+		var argsObj interface{}
+		if err := json.Unmarshal([]byte(argsJSON), &argsObj); err == nil {
+			argsObj = to_ir.RemoveNullsFromToolInput(argsObj)
+			if cleanedJSON, err := json.Marshal(argsObj); err == nil {
+				argsJSON = string(cleanedJSON)
+			}
+		}
 		fcMap := map[string]interface{}{
 			"name": tc.Name,
 			"args": json.RawMessage(argsJSON),
@@ -387,9 +425,14 @@ func (p *GeminiProvider) applyToolResponses(contents *[]interface{}, toolCallIDs
 		// as implementation details for "inlineData" inside functionResponse are tricky.
 		// Keeping it simple as per original logic structure but cleaner.
 
-		responseParts = append(responseParts, map[string]interface{}{
+		part := map[string]interface{}{
 			"functionResponse": funcResp,
-		})
+		}
+		// Add thoughtSignature if present (decoded from tool call ID for round-trip preservation)
+		if resultPart.ThoughtSignature != "" {
+			part["thoughtSignature"] = resultPart.ThoughtSignature
+		}
+		responseParts = append(responseParts, part)
 	}
 
 	if len(responseParts) > 0 {
@@ -439,6 +482,11 @@ func (p *GeminiProvider) applyTools(root map[string]interface{}, req *ir.Unified
 		}
 	}
 
+	// Auto-detect networking tools and enable googleSearch if found
+	if googleSearch == nil && to_ir.DetectsNetworkingTool(req.Tools) {
+		googleSearch = map[string]interface{}{}
+	}
+
 	if len(req.Tools) == 0 && googleSearch == nil {
 		return nil
 	}
@@ -446,17 +494,27 @@ func (p *GeminiProvider) applyTools(root map[string]interface{}, req *ir.Unified
 	toolNode := make(map[string]interface{})
 
 	if len(req.Tools) > 0 {
-		funcs := make([]interface{}, len(req.Tools))
-		for i, t := range req.Tools {
-			funcDecl := map[string]interface{}{"name": t.Name, "description": t.Description}
+		// Filter out networking tools from functionDeclarations (they're handled via googleSearch)
+		var funcs []interface{}
+		for _, t := range req.Tools {
+			// Skip networking tools - they're handled separately via googleSearch
+			if to_ir.IsNetworkingToolName(t.Name) {
+				continue
+			}
+			// Normalize function name to conform to Gemini API requirements
+			normalizedName := to_ir.NormalizeFunctionName(t.Name)
+			funcDecl := map[string]interface{}{"name": normalizedName, "description": t.Description}
 			if len(t.Parameters) == 0 {
 				funcDecl["parametersJsonSchema"] = map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
 			} else {
-				funcDecl["parametersJsonSchema"] = ir.CleanJsonSchema(copyMap(t.Parameters))
+				// Use enhanced schema cleaning with $ref resolution, allOf merge, anyOf→enum
+				funcDecl["parametersJsonSchema"] = to_ir.CleanJsonSchemaEnhanced(copyMap(t.Parameters))
 			}
-			funcs[i] = funcDecl
+			funcs = append(funcs, funcDecl)
 		}
-		toolNode["functionDeclarations"] = funcs
+		if len(funcs) > 0 {
+			toolNode["functionDeclarations"] = funcs
+		}
 	}
 
 	if googleSearch != nil {
@@ -678,4 +736,3 @@ func (p *GeminiCLIProvider) ParseStreamChunk(chunkJSON []byte) ([]ir.UnifiedEven
 func (p *GeminiCLIProvider) ParseStreamChunkWithContext(chunkJSON []byte, schemaCtx *ir.ToolSchemaContext) ([]ir.UnifiedEvent, error) {
 	return to_ir.ParseGeminiChunkWithContext(chunkJSON, schemaCtx)
 }
-

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/to_ir"
 )
 
 // OpenAIRequestFormat specifies which OpenAI API format to generate.
@@ -570,8 +571,8 @@ func buildImageDelta(event ir.UnifiedEvent) map[string]interface{} {
 		"role": "assistant",
 		"images": []interface{}{
 			map[string]interface{}{
-				"index":     0,
-				"type":      "image_url",
+				"index": 0,
+				"type":  "image_url",
 				"image_url": map[string]string{
 					"url": fmt.Sprintf("data:%s;base64,%s", event.Image.MimeType, event.Image.Data),
 				},
@@ -674,8 +675,11 @@ func buildOpenAIAssistantMessage(msg ir.Message) map[string]interface{} {
 	if len(msg.ToolCalls) > 0 {
 		tcs := make([]interface{}, len(msg.ToolCalls))
 		for i, tc := range msg.ToolCalls {
+			// Encode thoughtSignature into tool call ID for round-trip preservation
+			// This allows signature to survive even if clients strip custom fields
+			encodedID := to_ir.EncodeToolIDWithSignature(tc.ID, tc.ThoughtSignature)
 			tcs[i] = map[string]interface{}{
-				"id": tc.ID, "type": "function",
+				"id": encodedID, "type": "function",
 				"function": map[string]interface{}{"name": tc.Name, "arguments": tc.Args},
 			}
 		}
@@ -787,6 +791,8 @@ type ResponsesStreamState struct {
 	FuncNames       map[int]string
 	FuncArgsBuffer  map[int]string
 	FuncIsCustom    map[int]bool // Track which tool calls are custom tools
+	FuncDone        map[int]bool // Track if output_item.done was sent
+	ArgsDone        map[int]bool // Track if arguments.done was sent
 }
 
 func NewResponsesStreamState() *ResponsesStreamState {
@@ -795,6 +801,8 @@ func NewResponsesStreamState() *ResponsesStreamState {
 		FuncNames:      make(map[int]string),
 		FuncArgsBuffer: make(map[int]string),
 		FuncIsCustom:   make(map[int]bool),
+		FuncDone:       make(map[int]bool),
+		ArgsDone:       make(map[int]bool),
 	}
 }
 
@@ -933,6 +941,14 @@ func handleToolCallEvent(event ir.UnifiedEvent, state *ResponsesStreamState, nex
 		out = append(out, fmt.Sprintf("event: response.output_item.added\ndata: %s\n\n", string(b)))
 	}
 
+	// Accumulate args buffer for non-custom tool calls BEFORE sending delta.
+	// This ensures FuncArgsBuffer is populated even if EventTypeToolCall comes with args.
+	if !isCustom && event.ToolCall.Args != "" {
+		if state.FuncArgsBuffer != nil {
+			state.FuncArgsBuffer[idx] += event.ToolCall.Args
+		}
+	}
+
 	if event.ToolCall.Args != "" {
 		// Use correct event type for delta
 		if isCustom {
@@ -950,40 +966,57 @@ func handleToolCallEvent(event ir.UnifiedEvent, state *ResponsesStreamState, nex
 		}
 	}
 
-	// Use correct type for done event
-	itemType := "function_call"
-	if isCustom {
-		itemType = "custom_tool_call"
+	// Emit arguments.done ONLY when we have final arguments accumulated.
+	// Otherwise, clients (Codex/Cursor) may treat the tool call as finalized with empty args.
+	if !isCustom && !state.ArgsDone[idx] {
+		args := ""
+		if state.FuncArgsBuffer != nil {
+			args = state.FuncArgsBuffer[idx]
+		}
+		if args != "" {
+			bArgsDone, _ := json.Marshal(map[string]interface{}{
+				"type": "response.function_call_arguments.done", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
+				"output_index": idx, "arguments": args,
+			})
+			out = append(out, fmt.Sprintf("event: response.function_call_arguments.done\ndata: %s\n\n", string(bArgsDone)))
+			state.ArgsDone[idx] = true
+		}
 	}
 
-	// Send arguments.done event (required by Codex client to finalize arguments accumulation)
-	if !isCustom {
-		bArgsDone, _ := json.Marshal(map[string]interface{}{
-			"type": "response.function_call_arguments.done", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
-			"output_index": idx, "arguments": state.FuncArgsBuffer[idx],
+	// Only send output_item.done once we have arguments (for non-custom tools).
+	if !state.FuncDone[idx] {
+		if !isCustom && !state.ArgsDone[idx] {
+			return out
+		}
+
+		// Use correct type for done event
+		itemType := "function_call"
+		if isCustom {
+			itemType = "custom_tool_call"
+		}
+
+		doneItem := map[string]interface{}{
+			"id": state.FuncCallIDs[idx], "type": itemType, "status": "completed",
+			"call_id": event.ToolCall.ID, "name": event.ToolCall.Name,
+		}
+		if isCustom {
+			doneItem["input"] = event.ToolCall.Args
+		} else {
+			if state.FuncArgsBuffer != nil {
+				doneItem["arguments"] = state.FuncArgsBuffer[idx]
+			} else {
+				doneItem["arguments"] = ""
+			}
+		}
+
+		b, _ := json.Marshal(map[string]interface{}{
+			"type": "response.output_item.done", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
+			"output_index": idx, "item": doneItem,
 		})
-		out = append(out, fmt.Sprintf("event: response.function_call_arguments.done\ndata: %s\n\n", string(bArgsDone)))
-	} else {
-		// For custom tools, send custom_tool_call_input.done (if supported/needed, though less strictly documented)
-		// But usually custom tools just use input delta and then item done.
-		// Let's stick to item done for custom for now, or check if we need input done.
+		out = append(out, fmt.Sprintf("event: response.output_item.done\ndata: %s\n\n", string(b)))
+		state.FuncDone[idx] = true
 	}
 
-	doneItem := map[string]interface{}{
-		"id": state.FuncCallIDs[idx], "type": itemType, "status": "completed",
-		"call_id": event.ToolCall.ID, "name": event.ToolCall.Name,
-	}
-	if isCustom {
-		doneItem["input"] = event.ToolCall.Args
-	} else {
-		doneItem["arguments"] = event.ToolCall.Args
-	}
-
-	b, _ := json.Marshal(map[string]interface{}{
-		"type": "response.output_item.done", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
-		"output_index": idx, "item": doneItem,
-	})
-	out = append(out, fmt.Sprintf("event: response.output_item.done\ndata: %s\n\n", string(b)))
 	return out
 }
 
@@ -1002,6 +1035,9 @@ func handleToolCallDeltaEvent(event ir.UnifiedEvent, state *ResponsesStreamState
 		}
 		state.FuncCallIDs[idx] = id
 		state.FuncIsCustom[idx] = isCustom
+		if state.FuncNames != nil {
+			state.FuncNames[idx] = event.ToolCall.Name
+		}
 
 		// Use correct type based on whether it's a custom tool
 		itemType := "function_call"
@@ -1012,6 +1048,10 @@ func handleToolCallDeltaEvent(event ir.UnifiedEvent, state *ResponsesStreamState
 		item := map[string]interface{}{
 			"id": state.FuncCallIDs[idx], "type": itemType, "status": "in_progress",
 			"call_id": event.ToolCall.ID, "name": "",
+		}
+		// Fill name if we have it; otherwise keep empty and let later events fill it.
+		if event.ToolCall.Name != "" {
+			item["name"] = event.ToolCall.Name
 		}
 		if isCustom {
 			item["input"] = ""
@@ -1026,23 +1066,30 @@ func handleToolCallDeltaEvent(event ir.UnifiedEvent, state *ResponsesStreamState
 		out = append(out, fmt.Sprintf("event: response.output_item.added\ndata: %s\n\n", string(b)))
 	}
 
-	state.FuncArgsBuffer[idx] += event.ToolCall.Args
-
-	// Check if this index was marked as custom (either from this event or previous)
-	if state.FuncIsCustom[idx] || isCustom {
-		state.FuncIsCustom[idx] = true
-		b, _ := json.Marshal(map[string]interface{}{
-			"type": "response.custom_tool_call_input.delta", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
-			"output_index": idx, "delta": event.ToolCall.Args,
-		})
-		out = append(out, fmt.Sprintf("event: response.custom_tool_call_input.delta\ndata: %s\n\n", string(b)))
-	} else {
-		b, _ := json.Marshal(map[string]interface{}{
-			"type": "response.function_call_arguments.delta", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
-			"output_index": idx, "delta": event.ToolCall.Args,
-		})
-		out = append(out, fmt.Sprintf("event: response.function_call_arguments.delta\ndata: %s\n\n", string(b)))
+	// Accumulate args buffer for non-custom tool calls. This makes .done deterministic.
+	if !isCustom && event.ToolCall.Args != "" {
+		if state.FuncArgsBuffer != nil {
+			state.FuncArgsBuffer[idx] += event.ToolCall.Args
+		}
 	}
+
+	if event.ToolCall.Args != "" {
+		// Use correct event type for delta
+		if isCustom {
+			b, _ := json.Marshal(map[string]interface{}{
+				"type": "response.custom_tool_call_input.delta", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
+				"output_index": idx, "delta": event.ToolCall.Args,
+			})
+			out = append(out, fmt.Sprintf("event: response.custom_tool_call_input.delta\ndata: %s\n\n", string(b)))
+		} else {
+			b, _ := json.Marshal(map[string]interface{}{
+				"type": "response.function_call_arguments.delta", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
+				"output_index": idx, "delta": event.ToolCall.Args,
+			})
+			out = append(out, fmt.Sprintf("event: response.function_call_arguments.delta\ndata: %s\n\n", string(b)))
+		}
+	}
+
 	return out
 }
 

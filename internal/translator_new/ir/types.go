@@ -107,11 +107,12 @@ type FilePart struct {
 
 // ToolResultPart represents the result of a tool execution.
 type ToolResultPart struct {
-	ToolCallID string
-	ToolName   string       // Name of the tool that was called (for custom tool detection)
-	Result     string       // JSON string result
-	Images     []*ImagePart // Multimodal tool result (images)
-	Files      []*FilePart  // Multimodal tool result (files)
+	ToolCallID       string
+	ToolName         string       // Name of the tool that was called (for custom tool detection)
+	Result           string       // JSON string result
+	Images           []*ImagePart // Multimodal tool result (images)
+	Files            []*FilePart  // Multimodal tool result (files)
+	ThoughtSignature string       // Gemini thought signature (decoded from tool call ID for round-trip preservation)
 }
 
 // ContentPart represents a discrete part of a message (e.g., a block of text, an image).

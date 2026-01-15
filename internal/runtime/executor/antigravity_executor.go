@@ -23,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/to_ir"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -149,7 +150,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	translated = ApplyThinkingMetadataCLI(translated, req.Metadata, req.Model)
 	translated = util.ApplyGemini3ThinkingLevelFromMetadataCLI(req.Model, req.Metadata, translated)
 	translated = util.ApplyDefaultThinkingIfNeededCLI(req.Model, req.Metadata, translated)
-	translated = normalizeAntigravityThinking(req.Model, translated, isClaude)
+	translated = to_ir.NormalizeAntigravityThinking(req.Model, translated, isClaude)
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, "antigravity", "request", translated, originalTranslated)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
@@ -218,7 +219,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 
 		// Use new translator if enabled (no fallback)
 		if e.cfg != nil && e.cfg.UseCanonicalTranslator {
-			translatedResp, errTranslate := TranslateGeminiCLIResponseNonStream(e.cfg, from, bodyBytes, req.Model)
+			translatedResp, errTranslate := TranslateAntigravityResponseNonStream(e.cfg, from, bodyBytes, req.Model)
 			if errTranslate != nil {
 				return resp, fmt.Errorf("failed to translate response: %w", errTranslate)
 			}
@@ -282,7 +283,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	translated = ApplyThinkingMetadataCLI(translated, req.Metadata, req.Model)
 	translated = util.ApplyGemini3ThinkingLevelFromMetadataCLI(req.Model, req.Metadata, translated)
 	translated = util.ApplyDefaultThinkingIfNeededCLI(req.Model, req.Metadata, translated)
-	translated = normalizeAntigravityThinking(req.Model, translated, true)
+	translated = to_ir.NormalizeAntigravityThinking(req.Model, translated, true)
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, "antigravity", "request", translated, originalTranslated)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
@@ -659,7 +660,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	translated = ApplyThinkingMetadataCLI(translated, req.Metadata, req.Model)
 	translated = util.ApplyGemini3ThinkingLevelFromMetadataCLI(req.Model, req.Metadata, translated)
 	translated = util.ApplyDefaultThinkingIfNeededCLI(req.Model, req.Metadata, translated)
-	translated = normalizeAntigravityThinking(req.Model, translated, isClaude || isGemini3Pro)
+	translated = to_ir.NormalizeAntigravityThinking(req.Model, translated, isClaude || isGemini3Pro)
 	translated = applyPayloadConfigWithRoot(e.cfg, req.Model, "antigravity", "request", translated, originalTranslated)
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
@@ -775,7 +776,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 
 				// Use new translator if enabled (no fallback)
 				if useNewTranslator {
-					translatedChunks, errTranslate := TranslateGeminiCLIResponseStream(e.cfg, from, bytes.Clone(line), req.Model, messageID, streamState)
+					translatedChunks, errTranslate := TranslateAntigravityResponseStream(e.cfg, from, bytes.Clone(line), req.Model, messageID, streamState)
 					if errTranslate != nil {
 						out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("failed to translate chunk: %w", errTranslate)}
 						continue
@@ -880,7 +881,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		payload := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), false)
 		payload = ApplyThinkingMetadataCLI(payload, req.Metadata, req.Model)
 		payload = util.ApplyDefaultThinkingIfNeededCLI(req.Model, req.Metadata, payload)
-		payload = normalizeAntigravityThinking(req.Model, payload, isClaude)
+		payload = to_ir.NormalizeAntigravityThinking(req.Model, payload, isClaude)
 		payload = deleteJSONField(payload, "project")
 		payload = deleteJSONField(payload, "model")
 		payload = deleteJSONField(payload, "request.safetySettings")
@@ -1601,65 +1602,4 @@ func alias2ModelName(modelName string) string {
 	default:
 		return modelName
 	}
-}
-
-// normalizeAntigravityThinking clamps or removes thinking config based on model support.
-// For Claude models, it additionally ensures thinking budget < max_tokens.
-func normalizeAntigravityThinking(model string, payload []byte, isClaude bool) []byte {
-	payload = util.StripThinkingConfigIfUnsupported(model, payload)
-	if !util.ModelSupportsThinking(model) {
-		return payload
-	}
-	budget := gjson.GetBytes(payload, "request.generationConfig.thinkingConfig.thinkingBudget")
-	if !budget.Exists() {
-		return payload
-	}
-	raw := int(budget.Int())
-	normalized := util.NormalizeThinkingBudget(model, raw)
-
-	if isClaude {
-		effectiveMax, setDefaultMax := antigravityEffectiveMaxTokens(model, payload)
-		if effectiveMax > 0 && normalized >= effectiveMax {
-			normalized = effectiveMax - 1
-		}
-		minBudget := antigravityMinThinkingBudget(model)
-		if minBudget > 0 && normalized >= 0 && normalized < minBudget {
-			// Budget is below minimum, remove thinking config entirely
-			payload, _ = sjson.DeleteBytes(payload, "request.generationConfig.thinkingConfig")
-			return payload
-		}
-		if setDefaultMax {
-			if res, errSet := sjson.SetBytes(payload, "request.generationConfig.maxOutputTokens", effectiveMax); errSet == nil {
-				payload = res
-			}
-		}
-	}
-
-	updated, err := sjson.SetBytes(payload, "request.generationConfig.thinkingConfig.thinkingBudget", normalized)
-	if err != nil {
-		return payload
-	}
-	return updated
-}
-
-// antigravityEffectiveMaxTokens returns the max tokens to cap thinking:
-// prefer request-provided maxOutputTokens; otherwise fall back to model default.
-// The boolean indicates whether the value came from the model default (and thus should be written back).
-func antigravityEffectiveMaxTokens(model string, payload []byte) (max int, fromModel bool) {
-	if maxTok := gjson.GetBytes(payload, "request.generationConfig.maxOutputTokens"); maxTok.Exists() && maxTok.Int() > 0 {
-		return int(maxTok.Int()), false
-	}
-	if modelInfo := registry.GetGlobalRegistry().GetModelInfo(model); modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
-		return modelInfo.MaxCompletionTokens, true
-	}
-	return 0, false
-}
-
-// antigravityMinThinkingBudget returns the minimum thinking budget for a model.
-// Falls back to -1 if no model info is found.
-func antigravityMinThinkingBudget(model string) int {
-	if modelInfo := registry.GetGlobalRegistry().GetModelInfo(model); modelInfo != nil && modelInfo.Thinking != nil {
-		return modelInfo.Thinking.Min
-	}
-	return -1
 }

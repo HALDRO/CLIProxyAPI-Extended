@@ -114,6 +114,36 @@ func CacheSignature(sessionID, text, signature string) {
 	}
 }
 
+// CacheSignatureIfLonger stores a signature only if it's longer than the existing one.
+// This prevents shorter/invalid signatures from overwriting valid ones during streaming.
+// Antigravity-Manager uses this pattern to ensure the longest (most complete) signature is kept.
+func CacheSignatureIfLonger(sessionID, text, signature string) {
+	if sessionID == "" || text == "" || signature == "" {
+		return
+	}
+	if len(signature) < MinValidSignatureLen {
+		return
+	}
+
+	sc := getOrCreateSession(sessionID)
+	textHash := hashText(text)
+
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+
+	// Only store if new signature is longer than existing
+	if existing, exists := sc.entries[textHash]; exists {
+		if len(signature) <= len(existing.Signature) {
+			return // Keep existing longer signature
+		}
+	}
+
+	sc.entries[textHash] = SignatureEntry{
+		Signature: signature,
+		Timestamp: time.Now(),
+	}
+}
+
 // GetCachedSignature retrieves a cached signature for a given session and text.
 // Returns empty string if not found or expired.
 func GetCachedSignature(sessionID, text string) string {

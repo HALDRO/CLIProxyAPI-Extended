@@ -2,7 +2,10 @@
 package to_ir
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -302,23 +305,27 @@ func parseResponsesInputItem(item gjson.Result) *ir.Message {
 			}},
 		}
 	case "function_call_output":
+		// Decode thoughtSignature from tool call ID if encoded
+		callID, signature := DecodeToolIDAndSignature(item.Get("call_id").String())
 		return &ir.Message{
 			Role: ir.RoleTool,
 			Content: []ir.ContentPart{{
 				Type: ir.ContentTypeToolResult,
 				ToolResult: &ir.ToolResultPart{
-					ToolCallID: item.Get("call_id").String(), Result: item.Get("output").String(),
+					ToolCallID: callID, Result: item.Get("output").String(), ThoughtSignature: signature,
 				},
 			}},
 		}
 	case "custom_tool_call_output":
 		// Custom tool results - same structure as function_call_output but for custom tools
+		// Decode thoughtSignature from tool call ID if encoded
+		callID, signature := DecodeToolIDAndSignature(item.Get("call_id").String())
 		return &ir.Message{
 			Role: ir.RoleTool,
 			Content: []ir.ContentPart{{
 				Type: ir.ContentTypeToolResult,
 				ToolResult: &ir.ToolResultPart{
-					ToolCallID: item.Get("call_id").String(), Result: item.Get("output").String(),
+					ToolCallID: callID, Result: item.Get("output").String(), ThoughtSignature: signature,
 				},
 			}},
 		}
@@ -734,10 +741,13 @@ func parseOpenAIMessage(m gjson.Result) ir.Message {
 		if toolCallID == "" {
 			toolCallID = m.Get("tool_use_id").String()
 		}
+		// Decode thoughtSignature from tool call ID if encoded
+		// This restores the original ID and extracts the signature for round-trip preservation
+		originalID, signature := DecodeToolIDAndSignature(toolCallID)
 		msg.Content = append(msg.Content, ir.ContentPart{
 			Type: ir.ContentTypeToolResult,
 			ToolResult: &ir.ToolResultPart{
-				ToolCallID: toolCallID, Result: ir.SanitizeText(extractContentString(content)),
+				ToolCallID: originalID, Result: ir.SanitizeText(extractContentString(content)), ThoughtSignature: signature,
 			},
 		})
 	}
@@ -752,8 +762,18 @@ func parseOpenAIContentPart(item gjson.Result, msg *ir.Message) *ir.ContentPart 
 			return &ir.ContentPart{Type: ir.ContentTypeText, Text: text}
 		}
 	case "image_url":
-		if img := parseDataURI(item.Get("image_url.url").String()); img != nil {
+		url := item.Get("image_url.url").String()
+		// Try data URI first
+		if img := parseDataURI(url); img != nil {
 			return &ir.ContentPart{Type: ir.ContentTypeImage, Image: img}
+		}
+		// Try local file (file:// or direct path)
+		if img := parseLocalFileImage(url); img != nil {
+			return &ir.ContentPart{Type: ir.ContentTypeImage, Image: img}
+		}
+		// Fallback: treat as remote URL
+		if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
+			return &ir.ContentPart{Type: ir.ContentTypeImage, Image: &ir.ImagePart{URL: url}}
 		}
 	case "image":
 		mediaType := item.Get("source.media_type").String()
@@ -785,10 +805,12 @@ func parseOpenAIContentPart(item gjson.Result, msg *ir.Message) *ir.ContentPart 
 		})
 	case "tool_result":
 		msg.Role = ir.RoleTool
+		// Decode thoughtSignature from tool_use_id if encoded
+		toolUseID, signature := DecodeToolIDAndSignature(item.Get("tool_use_id").String())
 		return &ir.ContentPart{
 			Type: ir.ContentTypeToolResult,
 			ToolResult: &ir.ToolResultPart{
-				ToolCallID: item.Get("tool_use_id").String(), Result: ir.SanitizeText(extractContentString(item.Get("content"))),
+				ToolCallID: toolUseID, Result: ir.SanitizeText(extractContentString(item.Get("content"))), ThoughtSignature: signature,
 			},
 		}
 	}
@@ -944,6 +966,66 @@ func parseDataURI(url string) *ir.ImagePart {
 		mime = parts[0][5:idx]
 	}
 	return &ir.ImagePart{MimeType: mime, Data: parts[1]}
+}
+
+// parseLocalFileImage reads a local file and converts it to base64 ImagePart.
+// Supports file:// URIs and direct file paths.
+// This enables compatibility with clients that send local file references.
+func parseLocalFileImage(url string) *ir.ImagePart {
+	var filePath string
+
+	if strings.HasPrefix(url, "file://") {
+		// Handle file:// URI - remove prefix and handle Windows paths
+		filePath = strings.TrimPrefix(url, "file://")
+		// Windows paths may have extra slash: file:///C:/path
+		if len(filePath) > 2 && filePath[0] == '/' && filePath[2] == ':' {
+			filePath = filePath[1:] // Remove leading slash for Windows absolute paths
+		}
+	} else if strings.HasPrefix(url, "/") || (len(url) > 1 && url[1] == ':') {
+		// Direct Unix path (/path/to/file) or Windows path (C:\path\to\file)
+		filePath = url
+	} else {
+		return nil
+	}
+
+	// SECURITY: Basic path traversal protection
+	// Ensure the path is clean
+	cleanPath := filepath.Clean(filePath)
+
+	// Read file
+	data, err := os.ReadFile(cleanPath)
+	if err != nil {
+		return nil
+	}
+
+	// Detect MIME type from extension
+	mime := detectMimeTypeFromPath(cleanPath)
+
+	// Encode to base64
+	encoded := base64.StdEncoding.EncodeToString(data)
+
+	return &ir.ImagePart{MimeType: mime, Data: encoded}
+}
+
+// detectMimeTypeFromPath returns MIME type based on file extension.
+func detectMimeTypeFromPath(path string) string {
+	lower := strings.ToLower(path)
+	switch {
+	case strings.HasSuffix(lower, ".png"):
+		return "image/png"
+	case strings.HasSuffix(lower, ".gif"):
+		return "image/gif"
+	case strings.HasSuffix(lower, ".webp"):
+		return "image/webp"
+	case strings.HasSuffix(lower, ".svg"):
+		return "image/svg+xml"
+	case strings.HasSuffix(lower, ".bmp"):
+		return "image/bmp"
+	case strings.HasSuffix(lower, ".ico"):
+		return "image/x-icon"
+	default:
+		return "image/jpeg" // Default to JPEG
+	}
 }
 
 // extractContentString extracts text from content (string or array of text blocks).

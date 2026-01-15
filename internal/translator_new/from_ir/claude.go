@@ -18,6 +18,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/to_ir"
 )
 
 // Claude user tracking
@@ -350,7 +351,14 @@ func buildClaudeContentParts(msg ir.Message, includeToolCalls bool) []interface{
 	if includeToolCalls {
 		for _, tc := range msg.ToolCalls {
 			toolUse := map[string]interface{}{"type": ir.ClaudeBlockToolUse, "id": tc.ID, "name": tc.Name}
-			toolUse["input"] = ir.ParseToolCallArgs(tc.Args)
+			input := ir.ParseToolCallArgs(tc.Args)
+			// Remove null values from tool input (Roo/Kilo compatibility)
+			cleanedInput := to_ir.RemoveNullsFromToolInput(input)
+			if cleanedMap, ok := cleanedInput.(map[string]interface{}); ok {
+				toolUse["input"] = cleanedMap
+			} else {
+				toolUse["input"] = input
+			}
 			parts = append(parts, toolUse)
 		}
 	}
@@ -436,7 +444,7 @@ func emitSignatureDelta(signature string, state *ClaudeStreamState) string {
 		state.HasContent = true
 
 		if state.SessionID != "" && state.CurrentThinkingText.Len() > 0 {
-			cache.CacheSignature(state.SessionID, state.CurrentThinkingText.String(), signature)
+			cache.CacheSignatureIfLonger(state.SessionID, state.CurrentThinkingText.String(), signature)
 			log.Debugf("Cached signature for thinking block (sessionID=%s, textLen=%d)", state.SessionID, state.CurrentThinkingText.Len())
 			state.CurrentThinkingText.Reset()
 		}

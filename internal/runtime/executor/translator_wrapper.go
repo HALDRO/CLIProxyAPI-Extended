@@ -15,6 +15,47 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// TranslateAntigravityResponseNonStream converts Antigravity non-streaming response to target format using new translator.
+// Antigravity wraps responses in an envelope, so we unwrap it first using to_ir.ParseAntigravityResponse.
+// Returns nil if new translator is disabled (caller should use old translator as fallback).
+func TranslateAntigravityResponseNonStream(cfg *config.Config, to sdktranslator.Format, antigravityResponse []byte, model string) ([]byte, error) {
+	if cfg == nil || !cfg.UseCanonicalTranslator {
+		return nil, nil // Caller should use old translator
+	}
+
+	// Parse Antigravity response to IR (handles envelope unwrapping)
+	_, messages, usage, err := to_ir.ParseAntigravityResponse(antigravityResponse)
+	if err != nil {
+		return nil, err
+	}
+
+	return convertIRToNonStreamResponse(to, messages, usage, model, "chatcmpl-"+model)
+}
+
+// TranslateAntigravityResponseStream converts Antigravity streaming chunk to target format using new translator.
+// Antigravity wraps chunks in an envelope, so we unwrap it first using to_ir.ParseAntigravityChunk.
+// Returns nil if new translator is disabled (caller should use old translator as fallback).
+// state parameter is optional but recommended for stateful conversions (e.g., Claude tool calls).
+func TranslateAntigravityResponseStream(cfg *config.Config, to sdktranslator.Format, antigravityChunk []byte, model string, messageID string, state *GeminiCLIStreamState) ([][]byte, error) {
+	if cfg == nil || !cfg.UseCanonicalTranslator {
+		return nil, nil // Caller should use old translator
+	}
+
+	// Parse Antigravity chunk to IR events (with schema context if available)
+	var events []ir.UnifiedEvent
+	var err error
+	if state != nil && state.ToolSchemaCtx != nil {
+		events, err = to_ir.ParseAntigravityChunkWithContext(antigravityChunk, state.ToolSchemaCtx)
+	} else {
+		events, err = to_ir.ParseAntigravityChunk(antigravityChunk)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return convertGeminiEventsToChunks(events, to, model, messageID, state)
+}
+
 // OpenAI request format aliases for convenience.
 const (
 	FormatChatCompletions = from_ir.FormatChatCompletions
@@ -264,13 +305,8 @@ func NewAntigravityStreamState(originalRequest []byte) *GeminiCLIStreamState {
 		ToolCallSentHeader: make(map[int]bool),
 	}
 
-	if len(originalRequest) > 0 {
-		// Extract tool schemas efficiently using gjson (no full unmarshal)
-		tools := gjson.GetBytes(originalRequest, "tools").Array()
-		if len(tools) > 0 {
-			state.ToolSchemaCtx = ir.NewToolSchemaContextFromGJSON(tools)
-		}
-	}
+	// Use Antigravity-specific utility to extract tool schema context
+	state.ToolSchemaCtx = to_ir.NewAntigravityToolSchemaContext(originalRequest)
 
 	return state
 }

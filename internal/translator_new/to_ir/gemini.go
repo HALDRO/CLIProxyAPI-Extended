@@ -30,11 +30,6 @@ func ParseGeminiResponseMetaWithContext(rawJSON []byte, schemaCtx *ir.ToolSchema
 		return nil, nil, nil, &json.UnmarshalTypeError{Value: "invalid json"}
 	}
 
-	// Unwrap Antigravity envelope: {"response": {...}, "traceId": "..."}
-	if responseWrapper := gjson.GetBytes(rawJSON, "response"); responseWrapper.Exists() {
-		rawJSON = []byte(responseWrapper.Raw)
-	}
-
 	parsed := gjson.ParseBytes(rawJSON)
 	meta := parseGeminiMeta(parsed)
 	usage := parseGeminiUsage(parsed)
@@ -74,10 +69,32 @@ func ParseGeminiResponseMetaWithContext(rawJSON []byte, schemaCtx *ir.ToolSchema
 				if schemaCtx != nil {
 					args = schemaCtx.NormalizeToolCallArgs(name, args)
 				}
+				// Reverse transform string values to native types (Gemini sometimes returns all as strings)
+				args = ir.ReverseTransformArgsJSON(args)
 				msg.ToolCalls = append(msg.ToolCalls, ir.ToolCall{ID: ir.GenToolCallIDWithName(name), Name: name, Args: args, ThoughtSignature: ts})
 			}
 		} else if img := parseGeminiInlineImage(part); img != nil {
 			msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeImage, Image: img, ThoughtSignature: ts})
+		} else if execCode := part.Get("executableCode"); execCode.Exists() {
+			// Handle executable code (Gemini code execution feature)
+			code := &ir.CodeExecutionPart{
+				Language: execCode.Get("language").String(),
+				Code:     execCode.Get("code").String(),
+			}
+			if code.Code != "" {
+				formatted := ir.FormatCodeExecutionAsMarkdown(code)
+				msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: formatted, ThoughtSignature: ts})
+			}
+		} else if execResult := part.Get("codeExecutionResult"); execResult.Exists() {
+			// Handle code execution result
+			result := &ir.CodeExecutionResultPart{
+				Outcome: execResult.Get("outcome").String(),
+				Output:  execResult.Get("output").String(),
+			}
+			if result.Output != "" {
+				formatted := ir.FormatCodeExecutionResultAsMarkdown(result)
+				msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: formatted, ThoughtSignature: ts})
+			}
 		} else if ts != "" {
 			// Part with only thought signature (and maybe empty text)
 			// Preserve it as a reasoning part with empty text
@@ -89,7 +106,12 @@ func ParseGeminiResponseMetaWithContext(rawJSON []byte, schemaCtx *ir.ToolSchema
 		return nil, usage, meta, nil
 	}
 
-	return []ir.Message{msg}, usage, meta, nil
+	// Filter invalid thinking blocks and remove trailing unsigned thinking
+	messages := []ir.Message{msg}
+	messages = FilterInvalidThinkingBlocks(messages)
+	messages = RemoveTrailingUnsignedThinking(messages)
+
+	return messages, usage, meta, nil
 }
 
 // ParseGeminiChunk parses a streaming Gemini API chunk into events.
@@ -113,9 +135,6 @@ func ParseGeminiChunkWithContext(rawJSON []byte, schemaCtx *ir.ToolSchemaContext
 	}
 
 	parsed := gjson.ParseBytes(rawJSON)
-	if responseWrapper := parsed.Get("response"); responseWrapper.Exists() {
-		parsed = responseWrapper
-	}
 
 	var events []ir.UnifiedEvent
 	var finishReason ir.FinishReason
@@ -164,6 +183,8 @@ func ParseGeminiChunkWithContext(rawJSON []byte, schemaCtx *ir.ToolSchemaContext
 					if schemaCtx != nil {
 						args = schemaCtx.NormalizeToolCallArgs(name, args)
 					}
+					// Reverse transform string values to native types (Gemini sometimes returns all as strings)
+					args = ir.ReverseTransformArgsJSON(args)
 
 					var partialArgs string
 					if pa := fc.Get("partialArgs"); pa.Exists() {
@@ -181,6 +202,26 @@ func ParseGeminiChunkWithContext(rawJSON []byte, schemaCtx *ir.ToolSchemaContext
 			} else if img := parseGeminiInlineImage(part); img != nil {
 				// Handle inline image in streaming response
 				events = append(events, ir.UnifiedEvent{Type: ir.EventTypeImage, Image: img, ThoughtSignature: ts})
+			} else if execCode := part.Get("executableCode"); execCode.Exists() {
+				// Handle executable code (Gemini code execution feature)
+				code := &ir.CodeExecutionPart{
+					Language: execCode.Get("language").String(),
+					Code:     execCode.Get("code").String(),
+				}
+				if code.Code != "" {
+					formatted := ir.FormatCodeExecutionAsMarkdown(code)
+					events = append(events, ir.UnifiedEvent{Type: ir.EventTypeToken, Content: formatted, ThoughtSignature: ts})
+				}
+			} else if execResult := part.Get("codeExecutionResult"); execResult.Exists() {
+				// Handle code execution result
+				result := &ir.CodeExecutionResultPart{
+					Outcome: execResult.Get("outcome").String(),
+					Output:  execResult.Get("output").String(),
+				}
+				if result.Output != "" {
+					formatted := ir.FormatCodeExecutionResultAsMarkdown(result)
+					events = append(events, ir.UnifiedEvent{Type: ir.EventTypeToken, Content: formatted, ThoughtSignature: ts})
+				}
 			} else if ts != "" {
 				// Part with only thought signature
 				events = append(events, ir.UnifiedEvent{Type: ir.EventTypeReasoning, Reasoning: "", ThoughtSignature: ts})
@@ -249,11 +290,7 @@ func parseGeminiMeta(parsed gjson.Result) *ir.ResponseMeta {
 func parseGeminiUsage(parsed gjson.Result) *ir.Usage {
 	u := parsed.Get("usageMetadata")
 	if !u.Exists() {
-		// Antigravity envelope may carry usage in cpaUsageMetadata.
-		u = parsed.Get("cpaUsageMetadata")
-		if !u.Exists() {
-			return nil
-		}
+		return nil
 	}
 
 	promptTokens := int(u.Get("promptTokenCount").Int())
