@@ -9,6 +9,12 @@ type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// ShowProviderPrefixes controls whether to add visual provider prefixes to model IDs
+	// in model listings (e.g., "[Gemini CLI] gemini-2.5-pro").
+	// This is purely cosmetic and does not affect routing.
+	// Default: true.
+	ShowProviderPrefixes bool `yaml:"show-provider-prefixes" json:"show-provider-prefixes"`
+
 	// ForceModelPrefix requires explicit model prefixes (e.g., "teamA/gemini-3-pro-preview")
 	// to target prefixed credentials. When false, unprefixed model requests may use prefixed
 	// credentials as well.

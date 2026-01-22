@@ -28,6 +28,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -258,6 +259,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	managementasset.SetCurrentConfig(cfg)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	misc.SetCodexInstructionsEnabled(cfg.CodexInstructionsEnabled)
+	registry.GetGlobalRegistry().SetShowProviderPrefixes(cfg.ShowProviderPrefixes)
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
 	if optionState.localPassword != "" {
@@ -985,6 +987,15 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 			log.Debugf("debug mode updated from %t to %t", oldCfg.Debug, cfg.Debug)
 		} else {
 			log.Debugf("debug mode toggled to %t", cfg.Debug)
+		}
+	}
+
+	if oldCfg == nil || oldCfg.ShowProviderPrefixes != cfg.ShowProviderPrefixes {
+		registry.GetGlobalRegistry().SetShowProviderPrefixes(cfg.ShowProviderPrefixes)
+		if oldCfg != nil {
+			log.Debugf("show_provider_prefixes updated from %t to %t", oldCfg.ShowProviderPrefixes, cfg.ShowProviderPrefixes)
+		} else {
+			log.Debugf("show_provider_prefixes toggled to %t", cfg.ShowProviderPrefixes)
 		}
 	}
 

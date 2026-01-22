@@ -7,13 +7,13 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 $PSDefaultParameterValues['*:Encoding'] = 'utf8'
 chcp 65001 | Out-Null
 
-# Получаем порт и API ключ из конфига
+# Read port and API key from config
 $config = if (Test-Path "config.yaml") { Get-Content "config.yaml" -Raw } else { "" }
 $port = if ($config -match "port:\s*(\d+)") { [int]$matches[1] } else { 11434 }
 $apiKey = if ($config -match "api-keys:\s*\n\s*-\s*""([^""]+)""") { $matches[1] } else { "123456" }
 $exeName = "server.exe"
 
-# Функция для освобождения порта
+# Release port helper
 function Release-Port {
     param([int]$PortNumber)
     $procIds = netstat -ano | Select-String ":$PortNumber\s" | ForEach-Object {
@@ -29,7 +29,7 @@ function Release-Port {
     }
 }
 
-# Компиляция
+# Build
 Write-Host "Building server..." -ForegroundColor Cyan
 $buildResult = go build -o $exeName ./cmd/server 2>&1
 if ($LASTEXITCODE -ne 0) {
@@ -39,29 +39,47 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "Build successful" -ForegroundColor Green
 
-# Освобождаем порт
+# Release port
 Release-Port -PortNumber $port
 
-# Запускаем exe в фоне
+# Start exe in background
 Write-Host "Starting server..." -ForegroundColor Cyan
 $process = Start-Process -FilePath ".\$exeName" -PassThru -NoNewWindow
 
-# Ждём запуска и проверяем модели
+# Wait for server and fetch models
 Start-Sleep -Seconds 3
-for ($i = 0; $i -lt 10; $i++) {
+
+# On startup, clients may load asynchronously, so /v1/models can temporarily return
+# an incomplete list. Wait for a stable result.
+$lastIds = @()
+$stableHits = 0
+for ($i = 0; $i -lt 20; $i++) {
     try {
         $json = (Invoke-WebRequest -Uri "http://localhost:$port/v1/models" -Headers @{"Authorization"="Bearer $apiKey"}).Content | ConvertFrom-Json
-        Write-Host "`nAvailable models:" -ForegroundColor Green
-        $json.data.id | ForEach-Object { Write-Host $_ -ForegroundColor Yellow }
-        Write-Host ""
-        break
+        $ids = @($json.data.id)
+
+        if ($ids.Count -gt 0 -and $lastIds.Count -gt 0 -and ($ids -join "\n") -eq ($lastIds -join "\n")) {
+            $stableHits++
+        } else {
+            $stableHits = 0
+        }
+
+        $lastIds = $ids
+
+        # Consider the list stable after 2 identical responses in a row.
+        if ($ids.Count -gt 0 -and $stableHits -ge 1) {
+            Write-Host "`nAvailable models:" -ForegroundColor Green
+            $ids | ForEach-Object { Write-Host $_ -ForegroundColor Yellow }
+            Write-Host ""
+            break
+        }
     } catch {
-        if ($i -eq 9) { Write-Host "Failed to fetch models" -ForegroundColor Red }
-        Start-Sleep -Seconds 1
+        if ($i -eq 19) { Write-Host "Failed to fetch models" -ForegroundColor Red }
     }
+    Start-Sleep -Seconds 1
 }
 
-# Ждём завершения процесса
+# Wait for process exit
 try {
     $process | Wait-Process
 } finally {
