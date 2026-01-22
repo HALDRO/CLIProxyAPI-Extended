@@ -76,6 +76,9 @@ type Config struct {
 	// When true, the original instruction injection logic is used.
 	CodexInstructionsEnabled bool `yaml:"codex-instructions-enabled" json:"codex-instructions-enabled"`
 
+	// DisableAuth disables API key authentication for all endpoints (Ollama compatibility mode).
+	DisableAuth bool `yaml:"disable-auth" json:"disable-auth"`
+
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
 

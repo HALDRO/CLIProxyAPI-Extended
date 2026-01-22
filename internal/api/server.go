@@ -34,6 +34,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/gemini"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/ollama"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/openai"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -320,10 +321,11 @@ func (s *Server) setupRoutes() {
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)
 	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(s.handlers)
+	ollamaHandlers := ollama.NewOllamaAPIHandler(s.handlers)
 
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
-	v1.Use(AuthMiddleware(s.accessManager))
+	v1.Use(s.conditionalAuthMiddleware())
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
@@ -335,7 +337,7 @@ func (s *Server) setupRoutes() {
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
-	v1beta.Use(AuthMiddleware(s.accessManager))
+	v1beta.Use(s.conditionalAuthMiddleware())
 	{
 		v1beta.GET("/models", geminiHandlers.GeminiModels)
 		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
@@ -360,6 +362,29 @@ func (s *Server) setupRoutes() {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 	s.engine.POST("/v1internal:method", geminiCLIHandlers.CLIHandler)
+
+	// Ollama compatible API routes (no authentication required, like in the example)
+	// Handle /api/version without auth (before auth check)
+	s.engine.GET("/api/version", ollamaHandlers.Version)
+	s.engine.GET("/ollama/api/version", ollamaHandlers.Version)
+
+	// Handle other Ollama endpoints (with optional auth - can work without API key)
+	apiGroup := s.engine.Group("/api")
+	{
+		apiGroup.GET("/tags", ollamaHandlers.Tags)
+		apiGroup.POST("/chat", ollamaHandlers.Chat)
+		apiGroup.POST("/generate", ollamaHandlers.Generate)
+		apiGroup.POST("/show", ollamaHandlers.Show)
+	}
+
+	// Also support /ollama/api/* paths
+	ollamaGroup := s.engine.Group("/ollama/api")
+	{
+		ollamaGroup.GET("/tags", ollamaHandlers.Tags)
+		ollamaGroup.POST("/chat", ollamaHandlers.Chat)
+		ollamaGroup.POST("/generate", ollamaHandlers.Generate)
+		ollamaGroup.POST("/show", ollamaHandlers.Show)
+	}
 
 	// OAuth callback endpoints (reuse main server port)
 	// These endpoints receive provider redirects and persist
@@ -1063,6 +1088,19 @@ func (s *Server) SetWebsocketAuthChangeHandler(fn func(bool, bool)) {
 
 // (management handlers moved to internal/api/handlers/management)
 
+// conditionalAuthMiddleware returns middleware that checks disable-auth config flag.
+// If disable-auth is true, all requests are allowed without authentication.
+// Otherwise, standard authentication is applied.
+func (s *Server) conditionalAuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if s.cfg != nil && s.cfg.DisableAuth {
+			c.Next()
+			return
+		}
+		AuthMiddleware(s.accessManager)(c)
+	}
+}
+
 // AuthMiddleware returns a Gin middleware handler that authenticates requests
 // using the configured authentication providers. When no providers are available,
 // it allows all requests (legacy behaviour).
@@ -1087,8 +1125,10 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 		}
 
 		switch {
+		// Allow requests without credentials (Ollama compatibility)
 		case errors.Is(err, sdkaccess.ErrNoCredentials):
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Missing API key"})
+			c.Next()
+			return
 		case errors.Is(err, sdkaccess.ErrInvalidCredential):
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid API key"})
 		default:

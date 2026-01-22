@@ -90,10 +90,11 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if len(opts.OriginalRequest) > 0 {
 		originalPayload = bytes.Clone(opts.OriginalRequest)
 	}
-	originalPayload = misc.InjectCodexUserAgent(originalPayload, userAgent)
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
-	body := misc.InjectCodexUserAgent(bytes.Clone(req.Payload), userAgent)
-	body = sdktranslator.TranslateRequest(from, to, baseModel, body, false)
+	originalTranslated, body, err := sdktranslator.TranslateRequestPairE(ctx, from, to, baseModel, bytes.Clone(req.Payload), originalPayload, false)
+	if err != nil {
+		return resp, err
+	}
+	body = misc.InjectCodexUserAgent(body, userAgent)
 	body = misc.StripCodexUserAgent(body)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
@@ -176,7 +177,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		}
 
 		var param any
-		out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, bytes.Clone(originalPayload), body, line, &param)
+		out, err := sdktranslator.TranslateNonStreamE(ctx, to, from, req.Model, bytes.Clone(originalPayload), body, line, &param)
+		if err != nil {
+			return resp, fmt.Errorf("translate response: %w", err)
+		}
 		resp = cliproxyexecutor.Response{Payload: []byte(out)}
 		return resp, nil
 	}
@@ -203,9 +207,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		originalPayload = bytes.Clone(opts.OriginalRequest)
 	}
 	originalPayload = misc.InjectCodexUserAgent(originalPayload, userAgent)
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	body := misc.InjectCodexUserAgent(bytes.Clone(req.Payload), userAgent)
-	body = sdktranslator.TranslateRequest(from, to, baseModel, body, true)
+	originalTranslated, body, err := sdktranslator.TranslateRequestPairE(ctx, from, to, baseModel, bytes.Clone(req.Payload), originalPayload, true)
+	if err != nil {
+		return nil, err
+	}
+	body = misc.InjectCodexUserAgent(body, userAgent)
 	body = misc.StripCodexUserAgent(body)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
@@ -292,7 +298,12 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				}
 			}
 
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(originalPayload), body, bytes.Clone(line), &param)
+			chunks, err := sdktranslator.TranslateStreamE(ctx, to, from, req.Model, bytes.Clone(originalPayload), body, bytes.Clone(line), &param)
+			if err != nil {
+				reporter.publishFailure(ctx)
+				out <- cliproxyexecutor.StreamChunk{Err: err}
+				return
+			}
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
 			}
@@ -312,11 +323,13 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("codex")
 	userAgent := codexUserAgent(ctx)
-	body := misc.InjectCodexUserAgent(bytes.Clone(req.Payload), userAgent)
-	body = sdktranslator.TranslateRequest(from, to, baseModel, body, false)
-	body = misc.StripCodexUserAgent(body)
+	translatedReq, err := sdktranslator.TranslateRequestE(ctx, from, to, baseModel, misc.InjectCodexUserAgent(bytes.Clone(req.Payload), userAgent), false)
+	if err != nil {
+		return cliproxyexecutor.Response{}, fmt.Errorf("translate request: %w", err)
+	}
+	body := misc.StripCodexUserAgent(translatedReq)
 
-	body, err := thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}

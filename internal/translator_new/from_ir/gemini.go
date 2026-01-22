@@ -42,9 +42,6 @@ func (p *GeminiProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, err
 		p.fixImageAspectRatioForPreview(root, req.ImageConfig.AspectRatio)
 	}
 
-	// Clean [undefined] values injected by some clients (e.g., Cherry Studio)
-	ir.DeepCleanUndefined(root)
-
 	return json.Marshal(root)
 }
 
@@ -452,9 +449,8 @@ func (p *GeminiProvider) applyTools(root map[string]interface{}, req *ir.Unified
 			if to_ir.IsNetworkingToolName(t.Name) {
 				continue
 			}
-			// Normalize function name to conform to Gemini API requirements
-			normalizedName := to_ir.NormalizeFunctionName(t.Name)
-			funcDecl := map[string]interface{}{"name": normalizedName, "description": t.Description}
+			// Build function declaration
+			funcDecl := map[string]interface{}{"name": t.Name, "description": t.Description}
 			if len(t.Parameters) == 0 {
 				funcDecl["parametersJsonSchema"] = map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
 			} else {
@@ -682,8 +678,4 @@ func (p *GeminiCLIProvider) ParseResponse(responseJSON []byte) ([]ir.Message, *i
 
 func (p *GeminiCLIProvider) ParseStreamChunk(chunkJSON []byte) ([]ir.UnifiedEvent, error) {
 	return to_ir.ParseGeminiChunk(chunkJSON)
-}
-
-func (p *GeminiCLIProvider) ParseStreamChunkWithContext(chunkJSON []byte, schemaCtx *ir.ToolSchemaContext) ([]ir.UnifiedEvent, error) {
-	return to_ir.ParseGeminiChunkWithContext(chunkJSON, schemaCtx)
 }

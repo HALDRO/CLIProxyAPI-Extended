@@ -20,20 +20,13 @@ import (
 // ParseAntigravityResponse parses a non-streaming Antigravity API response into unified format.
 // Antigravity wraps Gemini responses in an envelope, so we unwrap it first.
 func ParseAntigravityResponse(rawJSON []byte) (*ir.UnifiedChatRequest, []ir.Message, *ir.Usage, error) {
-	messages, usage, _, err := ParseAntigravityResponseMetaWithContext(rawJSON, nil)
+	messages, usage, _, err := ParseAntigravityResponseMeta(rawJSON)
 	return nil, messages, usage, err
 }
 
 // ParseAntigravityResponseMeta parses a non-streaming Antigravity API response into unified format with metadata.
 // Returns messages, usage, and response metadata (responseId, createTime, nativeFinishReason).
 func ParseAntigravityResponseMeta(rawJSON []byte) ([]ir.Message, *ir.Usage, *ir.ResponseMeta, error) {
-	return ParseAntigravityResponseMetaWithContext(rawJSON, nil)
-}
-
-// ParseAntigravityResponseMetaWithContext parses a non-streaming Antigravity API response with schema context.
-// The schemaCtx parameter allows normalizing tool call parameters based on the original request schema.
-// Antigravity wraps Gemini responses in an envelope: {"response": {...}, "traceId": "..."}
-func ParseAntigravityResponseMetaWithContext(rawJSON []byte, schemaCtx *ir.ToolSchemaContext) ([]ir.Message, *ir.Usage, *ir.ResponseMeta, error) {
 	if !gjson.ValidBytes(rawJSON) {
 		return nil, nil, nil, &json.UnmarshalTypeError{Value: "invalid json"}
 	}
@@ -44,19 +37,12 @@ func ParseAntigravityResponseMetaWithContext(rawJSON []byte, schemaCtx *ir.ToolS
 	}
 
 	// Use Gemini parser for the unwrapped response
-	return ParseGeminiResponseMetaWithContext(rawJSON, schemaCtx)
+	return ParseGeminiResponseMeta(rawJSON)
 }
 
 // ParseAntigravityChunk parses a streaming Antigravity API chunk into events.
 // Antigravity wraps Gemini chunks in an envelope, so we unwrap it first.
 func ParseAntigravityChunk(rawJSON []byte) ([]ir.UnifiedEvent, error) {
-	return ParseAntigravityChunkWithContext(rawJSON, nil)
-}
-
-// ParseAntigravityChunkWithContext parses a streaming Antigravity API chunk with schema context.
-// The schemaCtx parameter allows normalizing tool call parameters based on the original request schema.
-// Antigravity wraps Gemini chunks in an envelope: {"response": {...}, "traceId": "..."}
-func ParseAntigravityChunkWithContext(rawJSON []byte, schemaCtx *ir.ToolSchemaContext) ([]ir.UnifiedEvent, error) {
 	// Handle SSE format: "data: {...}" or "data:{...}"
 	rawJSON = ir.ExtractSSEData(rawJSON)
 	if len(rawJSON) == 0 {
@@ -77,27 +63,7 @@ func ParseAntigravityChunkWithContext(rawJSON []byte, schemaCtx *ir.ToolSchemaCo
 	}
 
 	// Use Gemini parser for the unwrapped chunk
-	return ParseGeminiChunkWithContext(rawJSON, schemaCtx)
-}
-
-// --- Tool Schema Context ---
-
-// NewAntigravityToolSchemaContext creates a tool schema context from the original request.
-// Antigravity has a known issue where Gemini ignores tool parameter schemas and returns
-// different parameter names (e.g., "path" instead of "target_file").
-// This function extracts the expected schema from the original request to normalize responses.
-func NewAntigravityToolSchemaContext(originalRequest []byte) *ir.ToolSchemaContext {
-	if len(originalRequest) == 0 {
-		return nil
-	}
-
-	// Extract tool schemas efficiently using gjson (no full unmarshal)
-	tools := gjson.GetBytes(originalRequest, "tools").Array()
-	if len(tools) == 0 {
-		return nil
-	}
-
-	return ir.NewToolSchemaContextFromGJSON(tools)
+	return ParseGeminiChunk(rawJSON)
 }
 
 // --- Thinking Config Normalization ---

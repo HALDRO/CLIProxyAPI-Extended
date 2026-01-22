@@ -529,37 +529,6 @@ func MapFinishReasonToGemini(reason FinishReason) string {
 	}
 }
 
-// HasThoughtSignatureOnly checks if a Gemini part contains only thoughtSignature.
-func HasThoughtSignatureOnly(thoughtSig, thoughtSigSnake, text, functionCall, inlineData, inlineDataSnake interface{}) bool {
-	getString := func(r interface{}) string {
-		if r == nil {
-			return ""
-		}
-		if sg, ok := r.(interface{ String() string }); ok {
-			return sg.String()
-		}
-		return ""
-	}
-	exists := func(r interface{}) bool {
-		if r == nil {
-			return false
-		}
-		if ec, ok := r.(interface{ Exists() bool }); ok {
-			return ec.Exists()
-		}
-		return false
-	}
-
-	hasThoughtSig := (exists(thoughtSig) && getString(thoughtSig) != "") ||
-		(exists(thoughtSigSnake) && getString(thoughtSigSnake) != "")
-
-	if !hasThoughtSig {
-		return false
-	}
-
-	return !(exists(text) || exists(functionCall) || exists(inlineData) || exists(inlineDataSnake))
-}
-
 // =============================================================================
 // Token Estimation and Budget Mapping
 // =============================================================================

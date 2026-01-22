@@ -160,7 +160,10 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	}
 	reporter.publish(ctx, parseGeminiUsage(wsResp.Body))
 	var param any
-	out := sdktranslator.TranslateNonStream(ctx, body.toFormat, opts.SourceFormat, req.Model, bytes.Clone(opts.OriginalRequest), bytes.Clone(translatedReq), bytes.Clone(wsResp.Body), &param)
+	out, err := sdktranslator.TranslateNonStreamE(ctx, body.toFormat, opts.SourceFormat, req.Model, bytes.Clone(opts.OriginalRequest), bytes.Clone(translatedReq), bytes.Clone(wsResp.Body), &param)
+	if err != nil {
+		return resp, fmt.Errorf("translate response: %w", err)
+	}
 	resp = cliproxyexecutor.Response{Payload: ensureColonSpacedJSON([]byte(out))}
 	return resp, nil
 }
@@ -273,7 +276,12 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 					if detail, ok := parseGeminiStreamUsage(filtered); ok {
 						reporter.publish(ctx, detail)
 					}
-					lines := sdktranslator.TranslateStream(ctx, body.toFormat, opts.SourceFormat, req.Model, bytes.Clone(opts.OriginalRequest), translatedReq, bytes.Clone(filtered), &param)
+					lines, err := sdktranslator.TranslateStreamE(ctx, body.toFormat, opts.SourceFormat, req.Model, bytes.Clone(opts.OriginalRequest), translatedReq, bytes.Clone(filtered), &param)
+					if err != nil {
+						reporter.publishFailure(ctx)
+						out <- cliproxyexecutor.StreamChunk{Err: err}
+						return false
+					}
 					for i := range lines {
 						out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON([]byte(lines[i]))}
 					}
@@ -289,7 +297,12 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 				if len(event.Payload) > 0 {
 					appendAPIResponseChunk(ctx, e.cfg, bytes.Clone(event.Payload))
 				}
-				lines := sdktranslator.TranslateStream(ctx, body.toFormat, opts.SourceFormat, req.Model, bytes.Clone(opts.OriginalRequest), translatedReq, bytes.Clone(event.Payload), &param)
+				lines, err := sdktranslator.TranslateStreamE(ctx, body.toFormat, opts.SourceFormat, req.Model, bytes.Clone(opts.OriginalRequest), translatedReq, bytes.Clone(event.Payload), &param)
+				if err != nil {
+					reporter.publishFailure(ctx)
+					out <- cliproxyexecutor.StreamChunk{Err: err}
+					return false
+				}
 				for i := range lines {
 					out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON([]byte(lines[i]))}
 				}
@@ -391,9 +404,11 @@ func (e *AIStudioExecutor) translateRequest(req cliproxyexecutor.Request, opts c
 	if len(opts.OriginalRequest) > 0 {
 		originalPayload = bytes.Clone(opts.OriginalRequest)
 	}
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, stream)
-	payload := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), stream)
-	payload, err := thinking.ApplyThinking(payload, req.Model, from.String(), to.String(), e.Identifier())
+	originalTranslated, payload, err := sdktranslator.TranslateRequestPairE(context.Background(), from, to, baseModel, bytes.Clone(req.Payload), originalPayload, stream)
+	if err != nil {
+		return nil, translatedPayload{}, err
+	}
+	payload, err = thinking.ApplyThinking(payload, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, translatedPayload{}, err
 	}

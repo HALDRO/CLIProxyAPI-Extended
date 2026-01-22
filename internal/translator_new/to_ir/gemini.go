@@ -13,19 +13,13 @@ import (
 
 // ParseGeminiResponse parses a non-streaming Gemini API response into unified format.
 func ParseGeminiResponse(rawJSON []byte) (*ir.UnifiedChatRequest, []ir.Message, *ir.Usage, error) {
-	messages, usage, _, err := ParseGeminiResponseMetaWithContext(rawJSON, nil)
+	messages, usage, _, err := ParseGeminiResponseMeta(rawJSON)
 	return nil, messages, usage, err
 }
 
 // ParseGeminiResponseMeta parses a non-streaming Gemini API response into unified format with metadata.
 // Returns messages, usage, and response metadata (responseId, createTime, nativeFinishReason).
 func ParseGeminiResponseMeta(rawJSON []byte) ([]ir.Message, *ir.Usage, *ir.ResponseMeta, error) {
-	return ParseGeminiResponseMetaWithContext(rawJSON, nil)
-}
-
-// ParseGeminiResponseMetaWithContext parses a non-streaming Gemini API response with schema context.
-// The schemaCtx parameter allows normalizing tool call parameters based on the original request schema.
-func ParseGeminiResponseMetaWithContext(rawJSON []byte, schemaCtx *ir.ToolSchemaContext) ([]ir.Message, *ir.Usage, *ir.ResponseMeta, error) {
 	if !gjson.ValidBytes(rawJSON) {
 		return nil, nil, nil, &json.UnmarshalTypeError{Value: "invalid json"}
 	}
@@ -65,36 +59,10 @@ func ParseGeminiResponseMetaWithContext(rawJSON []byte, schemaCtx *ir.ToolSchema
 				if args == "" {
 					args = "{}"
 				}
-				// Normalize tool call args based on schema context
-				if schemaCtx != nil {
-					args = schemaCtx.NormalizeToolCallArgs(name, args)
-				}
-				// Reverse transform string values to native types (Gemini sometimes returns all as strings)
-				args = ir.ReverseTransformArgsJSON(args)
 				msg.ToolCalls = append(msg.ToolCalls, ir.ToolCall{ID: ir.GenToolCallIDWithName(name), Name: name, Args: args, ThoughtSignature: ts})
 			}
 		} else if img := parseGeminiInlineImage(part); img != nil {
 			msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeImage, Image: img, ThoughtSignature: ts})
-		} else if execCode := part.Get("executableCode"); execCode.Exists() {
-			// Handle executable code (Gemini code execution feature)
-			code := &ir.CodeExecutionPart{
-				Language: execCode.Get("language").String(),
-				Code:     execCode.Get("code").String(),
-			}
-			if code.Code != "" {
-				formatted := ir.FormatCodeExecutionAsMarkdown(code)
-				msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: formatted, ThoughtSignature: ts})
-			}
-		} else if execResult := part.Get("codeExecutionResult"); execResult.Exists() {
-			// Handle code execution result
-			result := &ir.CodeExecutionResultPart{
-				Outcome: execResult.Get("outcome").String(),
-				Output:  execResult.Get("output").String(),
-			}
-			if result.Output != "" {
-				formatted := ir.FormatCodeExecutionResultAsMarkdown(result)
-				msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: formatted, ThoughtSignature: ts})
-			}
 		} else if ts != "" {
 			// Part with only thought signature (and maybe empty text)
 			// Preserve it as a reasoning part with empty text
@@ -117,12 +85,6 @@ func ParseGeminiResponseMetaWithContext(rawJSON []byte, schemaCtx *ir.ToolSchema
 
 // ParseGeminiChunk parses a streaming Gemini API chunk into events.
 func ParseGeminiChunk(rawJSON []byte) ([]ir.UnifiedEvent, error) {
-	return ParseGeminiChunkWithContext(rawJSON, nil)
-}
-
-// ParseGeminiChunkWithContext parses a streaming Gemini API chunk with schema context.
-// The schemaCtx parameter allows normalizing tool call parameters based on the original request schema.
-func ParseGeminiChunkWithContext(rawJSON []byte, schemaCtx *ir.ToolSchemaContext) ([]ir.UnifiedEvent, error) {
 	// Handle SSE format: "data: {...}" or "data:{...}"
 	rawJSON = ir.ExtractSSEData(rawJSON)
 	if len(rawJSON) == 0 {
@@ -180,13 +142,6 @@ func ParseGeminiChunkWithContext(rawJSON []byte, schemaCtx *ir.ToolSchemaContext
 						args = "{}"
 					}
 
-					// Normalize tool call args based on schema context
-					if schemaCtx != nil {
-						args = schemaCtx.NormalizeToolCallArgs(name, args)
-					}
-					// Reverse transform string values to native types (Gemini sometimes returns all as strings)
-					args = ir.ReverseTransformArgsJSON(args)
-
 					var partialArgs string
 					if pa := fc.Get("partialArgs"); pa.Exists() {
 						partialArgs = pa.Raw
@@ -203,26 +158,6 @@ func ParseGeminiChunkWithContext(rawJSON []byte, schemaCtx *ir.ToolSchemaContext
 			} else if img := parseGeminiInlineImage(part); img != nil {
 				// Handle inline image in streaming response
 				events = append(events, ir.UnifiedEvent{Type: ir.EventTypeImage, Image: img, ThoughtSignature: ts})
-			} else if execCode := part.Get("executableCode"); execCode.Exists() {
-				// Handle executable code (Gemini code execution feature)
-				code := &ir.CodeExecutionPart{
-					Language: execCode.Get("language").String(),
-					Code:     execCode.Get("code").String(),
-				}
-				if code.Code != "" {
-					formatted := ir.FormatCodeExecutionAsMarkdown(code)
-					events = append(events, ir.UnifiedEvent{Type: ir.EventTypeToken, Content: formatted, ThoughtSignature: ts})
-				}
-			} else if execResult := part.Get("codeExecutionResult"); execResult.Exists() {
-				// Handle code execution result
-				result := &ir.CodeExecutionResultPart{
-					Outcome: execResult.Get("outcome").String(),
-					Output:  execResult.Get("output").String(),
-				}
-				if result.Output != "" {
-					formatted := ir.FormatCodeExecutionResultAsMarkdown(result)
-					events = append(events, ir.UnifiedEvent{Type: ir.EventTypeToken, Content: formatted, ThoughtSignature: ts})
-				}
 			} else if ts != "" {
 				// Part with only thought signature
 				events = append(events, ir.UnifiedEvent{Type: ir.EventTypeReasoning, Reasoning: "", ThoughtSignature: ts})
@@ -234,25 +169,11 @@ func ParseGeminiChunkWithContext(rawJSON []byte, schemaCtx *ir.ToolSchemaContext
 			frStr := fr.String()
 			finishReason = ir.MapGeminiFinishReason(frStr)
 
-			// Handle MALFORMED_FUNCTION_CALL - extract tool call from finishMessage
-			if frStr == "MALFORMED_FUNCTION_CALL" {
-				if fm := candidate.Get("finishMessage"); fm.Exists() {
-					if funcName, argsJSON, ok := ir.ParseMalformedFunctionCall(fm.String()); ok {
-						// Normalize args if schema context available
-						if schemaCtx != nil {
-							argsJSON = schemaCtx.NormalizeToolCallArgs(funcName, argsJSON)
-						}
-						events = append(events, ir.UnifiedEvent{
-							Type: ir.EventTypeToolCall,
-							ToolCall: &ir.ToolCall{
-								ID:   ir.GenToolCallIDWithName(funcName),
-								Name: funcName,
-								Args: argsJSON,
-							},
-						})
-					}
+			// Handle MALFORMED_FUNCTION_CALL - Gemini sometimes returns malformed tool calls
+			// Skip these for now as they require special parsing
+				if frStr == "MALFORMED_FUNCTION_CALL" {
+					// Skip malformed function calls - no event emitted
 				}
-			}
 		}
 	}
 

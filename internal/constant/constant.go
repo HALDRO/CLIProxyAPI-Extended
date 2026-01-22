@@ -25,6 +25,9 @@ const (
 	// Antigravity represents the Antigravity response format identifier.
 	Antigravity = "antigravity"
 
-	// Kiro represents the AWS CodeWhisperer (Kiro) provider identifier.
+	// Ollama represents the Ollama API format identifier.
+	Ollama = "ollama"
+
+	// Kiro represents the Kiro (Amazon Q / AWS CodeWhisperer) provider identifier.
 	Kiro = "kiro"
 )

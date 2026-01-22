@@ -28,24 +28,30 @@ auths/*
 
 # Documentation
 docs/*
+!docs/cline-integration.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md
+log_analyzer.go
 
 # Tooling metadata
 .vscode/*
+.cursor/*
 .codex/*
 .claude/*
 .gemini/*
 .serena/*
 .agent/*
 .agents/*
-.agents/*
 .opencode/*
 .bmad/*
 _bmad/*
 _bmad-output/*
 .mcp/cache/
+
+# Local data (fork-specific)
+/auth/
+_wgun/
 
 # macOS
 .DS_Store
