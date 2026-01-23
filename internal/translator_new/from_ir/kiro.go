@@ -1,13 +1,12 @@
 /**
  * @file Kiro (Amazon Q) request converter
- * @description Converts unified format into Kiro API request format.
+ * @description Converts unified format into Kiro API request format using strict structs.
  */
 
 package from_ir
 
 import (
 	"encoding/json"
-	"strconv"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
@@ -16,37 +15,157 @@ import (
 // KiroProvider handles conversion from unified format to Kiro API format.
 type KiroProvider struct{}
 
+// -- Kiro API Structs --
+
+type KiroRequest struct {
+	ConversationState ConversationState `json:"conversationState"`
+	ProfileArn        string            `json:"profileArn,omitempty"`
+	InferenceConfig   *InferenceConfig  `json:"inferenceConfig,omitempty"`
+}
+
+type ConversationState struct {
+	ChatTriggerType string           `json:"chatTriggerType"`
+	ConversationId  string           `json:"conversationId"`
+	CurrentMessage  CurrentMessage   `json:"currentMessage"`
+	History         []HistoryMessage `json:"history"` // Can be empty list, but usually not null
+}
+
+type InferenceConfig struct {
+	MaxTokens   *int     `json:"maxTokens,omitempty"`
+	Temperature *float64 `json:"temperature,omitempty"`
+	TopP        *float64 `json:"topP,omitempty"`
+}
+
+type CurrentMessage struct {
+	UserInputMessage UserInputMessage `json:"userInputMessage"`
+}
+
+type HistoryMessage struct {
+	UserInputMessage         *UserInputMessage         `json:"userInputMessage,omitempty"`
+	AssistantResponseMessage *AssistantResponseMessage `json:"assistantResponseMessage,omitempty"`
+}
+
+type UserInputMessage struct {
+	Content                 string                   `json:"content"`
+	ModelId                 string                   `json:"modelId"`
+	Origin                  string                   `json:"origin"`
+	UserInputMessageContext *UserInputMessageContext `json:"userInputMessageContext,omitempty"`
+	Images                  []ImageItem              `json:"images,omitempty"`
+}
+
+type AssistantResponseMessage struct {
+	Content  string    `json:"content"`
+	ToolUses []ToolUse `json:"toolUses,omitempty"`
+}
+
+type UserInputMessageContext struct {
+	Tools       []ToolSpecification `json:"tools,omitempty"`
+	ToolResults []ToolResult        `json:"toolResults,omitempty"`
+}
+
+type ToolSpecification struct {
+	ToolSpecification ToolSpecDetails `json:"toolSpecification"`
+}
+
+type ToolSpecDetails struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	InputSchema ToolInputSchema `json:"inputSchema"`
+}
+
+type ToolInputSchema struct {
+	Json interface{} `json:"json"` // raw schema
+}
+
+type ToolResult struct {
+	ToolUseId string              `json:"toolUseId"`
+	Content   []ToolResultContent `json:"content"`
+	Status    string              `json:"status"`
+}
+
+type ToolResultContent struct {
+	Text string      `json:"text,omitempty"`
+	Json interface{} `json:"json,omitempty"`
+}
+
+type ToolUse struct {
+	ToolUseId string      `json:"toolUseId"`
+	Name      string      `json:"name"`
+	Input     interface{} `json:"input"` // JSON object
+}
+
+type ImageItem struct {
+	Format string      `json:"format"`
+	Source ImageSource `json:"source"`
+}
+
+// Updated ImageSource to use interface{} for Bytes to prevent double encoding
+type ImageSource struct {
+	Bytes interface{} `json:"bytes"`
+}
+
+// -- Conversion Logic --
+
 // ConvertRequest converts UnifiedChatRequest to Kiro API JSON format.
 func (p *KiroProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 	origin := extractOrigin(req)
-	tools := extractTools(req.Tools)
+	tools := extractToolsStruct(req.Tools)
 	systemPrompt := extractSystemPrompt(req.Messages)
 
-	// Inject thinking mode configuration if enabled
-	// Kiro API supports official thinking/reasoning mode via <thinking_mode> tag.
-	// When set to "enabled", Kiro returns reasoning content as official reasoningContentEvent
-	// rather than inline <thinking> tags in assistantResponseEvent.
-	systemPrompt = injectThinkingMode(req.Thinking, systemPrompt)
+	// Inject thinking mode - keeping simple for now to avoid validation issues
+	// systemPrompt = injectThinkingMode(req.Thinking, systemPrompt)
 
-	history, currentMessage := processMessages(req.Messages, tools, req.Model, origin)
+	history, currentMsg := processMessagesStruct(req.Messages, tools, req.Model, origin)
 
-	injectSystemPrompt(systemPrompt, &history, currentMessage, req.Model, origin)
+	// Inject system prompt
+	if systemPrompt != "" {
+		injectSystemPromptStruct(systemPrompt, &history, &currentMsg)
+	}
 
-	request := map[string]interface{}{
-		"conversationState": map[string]interface{}{
-			"chatTriggerType": "MANUAL",
-			"conversationId":  ir.GenerateUUID(),
-			"currentMessage":  currentMessage,
-			"history":         history,
+	// Prepare request struct
+	request := KiroRequest{
+		ConversationState: ConversationState{
+			ChatTriggerType: "MANUAL",
+			ConversationId:  ir.GenerateUUID(),
+			CurrentMessage:  currentMsg,
+			History:         history,
 		},
+	}
+
+	if request.ConversationState.History == nil {
+		request.ConversationState.History = []HistoryMessage{}
 	}
 
 	if req.Metadata != nil {
 		if arn, ok := req.Metadata["profileArn"].(string); ok && arn != "" {
-			request["profileArn"] = arn
+			request.ProfileArn = arn
 		}
 	}
 
+	// Inference Config
+	infConfig := &InferenceConfig{}
+	hasConfig := false
+	if req.MaxTokens != nil {
+		val := *req.MaxTokens
+		if val == -1 {
+			val = 32000 // Kiro max
+		}
+		infConfig.MaxTokens = &val
+		hasConfig = true
+	}
+	if req.Temperature != nil {
+		infConfig.Temperature = req.Temperature
+		hasConfig = true
+	}
+	if req.TopP != nil {
+		infConfig.TopP = req.TopP
+		hasConfig = true
+	}
+	if hasConfig {
+		request.InferenceConfig = infConfig
+	}
+
+	// Marshal
 	result, err := json.Marshal(request)
 	if err != nil {
 		return nil, err
@@ -63,16 +182,17 @@ func extractOrigin(req *ir.UnifiedChatRequest) string {
 	return "AI_EDITOR"
 }
 
-func extractTools(irTools []ir.ToolDefinition) []interface{} {
+func extractToolsStruct(irTools []ir.ToolDefinition) []ToolSpecification {
 	if len(irTools) == 0 {
 		return nil
 	}
-	tools := make([]interface{}, len(irTools))
+	tools := make([]ToolSpecification, len(irTools))
 	for i, t := range irTools {
-		tools[i] = map[string]interface{}{
-			"toolSpecification": map[string]interface{}{
-				"name": t.Name, "description": t.Description,
-				"inputSchema": map[string]interface{}{"json": t.Parameters},
+		tools[i] = ToolSpecification{
+			ToolSpecification: ToolSpecDetails{
+				Name:        t.Name,
+				Description: t.Description,
+				InputSchema: ToolInputSchema{Json: t.Parameters},
 			},
 		}
 	}
@@ -89,58 +209,253 @@ func extractSystemPrompt(messages []ir.Message) string {
 	return strings.Join(parts, "\n")
 }
 
-func processMessages(messages []ir.Message, tools []interface{}, modelID, origin string) ([]interface{}, map[string]interface{}) {
+func processMessagesStruct(messages []ir.Message, tools []ToolSpecification, modelID, origin string) ([]HistoryMessage, CurrentMessage) {
 	nonSystem := filterSystemMessages(messages)
 	nonSystem = mergeConsecutiveMessages(nonSystem)
-
-	// Handle prefill: if last message is from assistant without tool_calls, it's a prefill
-	// Kiro doesn't support prefill, so we remove it
 	nonSystem = removePrefill(nonSystem)
-
 	nonSystem = alternateRoles(nonSystem)
 
 	if len(nonSystem) == 0 {
-		return nil, nil
+		// Fallback for empty conversation
+		return []HistoryMessage{}, CurrentMessage{
+			UserInputMessage: UserInputMessage{
+				Content: "Continue",
+				ModelId: modelID,
+				Origin:  origin,
+			},
+		}
 	}
 
+	// Check logic for last message
 	lastMsg := nonSystem[len(nonSystem)-1]
+
+	// If last is User, it's CurrentMessage. Rest is history.
 	if lastMsg.Role == ir.RoleUser {
-		history := buildHistory(nonSystem[:len(nonSystem)-1], tools, modelID, origin)
-		return history, convertMessage(lastMsg, tools, modelID, origin, true)
+		history := buildHistoryStruct(nonSystem[:len(nonSystem)-1], tools, modelID, origin)
+		current := buildUserMessageStruct(lastMsg, tools, modelID, origin, true)
+		return history, CurrentMessage{UserInputMessage: *current}
 	}
 
-	// Handle trailing tool messages
+	// If last uses tools or is assistant, we might be in a flow.
+	// But usually the request to Kiro implies *User* is sending something (or Tool Result).
+
+	// Handle trailing tool messages (User role in Kiro IR, but Tool in Unified IR)
 	trailingStart := findTrailingStart(nonSystem)
-	history := buildHistory(nonSystem[:trailingStart], tools, modelID, origin)
 
-	var currentMessage map[string]interface{}
+	history := buildHistoryStruct(nonSystem[:trailingStart], tools, modelID, origin)
+
+	var currentMsg UserInputMessage
+
 	if trailingStart < len(nonSystem) {
-		currentMessage = buildMergedToolResultMessage(nonSystem[trailingStart:], tools, modelID, origin)
+		// We have tool results at the end
+		currentMsg = buildMergedToolResultMessageStruct(nonSystem[trailingStart:], tools, modelID, origin)
 	} else {
-		currentMessage = convertMessage(nonSystem[len(nonSystem)-1], tools, modelID, origin, true)
+		// Last was Assistant? Kiro expects UserInput as CurrentMessage.
+		// If last was Assistant, we force a "Continue" user message.
+		currentMsg = UserInputMessage{
+			Content: "Continue",
+			ModelId: modelID,
+			Origin:  origin,
+		}
 	}
-	return history, currentMessage
+
+	return history, CurrentMessage{UserInputMessage: currentMsg}
 }
 
+func buildHistoryStruct(messages []ir.Message, tools []ToolSpecification, modelID, origin string) []HistoryMessage {
+	history := make([]HistoryMessage, 0, len(messages))
+	for _, msg := range messages {
+		if msg.Role == ir.RoleUser {
+			uMsg := buildUserMessageStruct(msg, tools, modelID, origin, false)
+			history = append(history, HistoryMessage{UserInputMessage: uMsg})
+		} else if msg.Role == ir.RoleAssistant {
+			aMsg := buildAssistantMessageStruct(msg)
+			history = append(history, HistoryMessage{AssistantResponseMessage: aMsg})
+		} else if msg.Role == ir.RoleTool {
+			// Tool results in history are treated as UserInputMessage in Kiro
+			uMsg := buildToolResultMessageStruct(msg, modelID, origin)
+			if uMsg != nil {
+				history = append(history, HistoryMessage{UserInputMessage: uMsg})
+			}
+		}
+	}
+	return history
+}
+
+func buildUserMessageStruct(msg ir.Message, tools []ToolSpecification, modelID, origin string, isCurrent bool) *UserInputMessage {
+	content := ir.CombineTextParts(msg)
+	var toolResults []ToolResult
+	var images []ImageItem
+
+	for _, part := range msg.Content {
+		if part.Type == ir.ContentTypeToolResult && part.ToolResult != nil {
+			toolResults = append(toolResults, buildToolResultStruct(part.ToolResult))
+		} else if part.Type == ir.ContentTypeImage && part.Image != nil {
+			images = append(images, buildImageItemStruct(part.Image))
+		}
+	}
+
+	if isCurrent && content == "" && len(toolResults) == 0 {
+		content = "Continue"
+	}
+
+	uInput := &UserInputMessage{
+		Content: content,
+		ModelId: modelID,
+		Origin:  origin,
+	}
+
+	if len(images) > 0 {
+		uInput.Images = images
+	}
+
+	// Context (Tools + ToolResults)
+	hasContext := false
+	ctx := UserInputMessageContext{}
+
+	if isCurrent && len(tools) > 0 {
+		ctx.Tools = tools
+		hasContext = true
+	}
+	if len(toolResults) > 0 {
+		ctx.ToolResults = toolResults
+		hasContext = true
+	}
+
+	if hasContext {
+		uInput.UserInputMessageContext = &ctx
+	}
+
+	return uInput
+}
+
+func buildAssistantMessageStruct(msg ir.Message) *AssistantResponseMessage {
+	var toolUses []ToolUse
+	for _, tc := range msg.ToolCalls {
+		toolUses = append(toolUses, ToolUse{
+			ToolUseId: tc.ID,
+			Name:      tc.Name,
+			Input:     ir.ParseToolCallArgs(tc.Args),
+		})
+	}
+	return &AssistantResponseMessage{
+		Content:  ir.CombineTextParts(msg),
+		ToolUses: toolUses,
+	}
+}
+
+func buildToolResultMessageStruct(msg ir.Message, modelID, origin string) *UserInputMessage {
+	var toolResults []ToolResult
+	for _, part := range msg.Content {
+		if part.Type == ir.ContentTypeToolResult && part.ToolResult != nil {
+			toolResults = append(toolResults, buildToolResultStruct(part.ToolResult))
+		}
+	}
+	if len(toolResults) == 0 {
+		return nil
+	}
+
+	return &UserInputMessage{
+		Content: "Continue",
+		ModelId: modelID,
+		Origin:  origin,
+		UserInputMessageContext: &UserInputMessageContext{
+			ToolResults: toolResults,
+		},
+	}
+}
+
+func buildMergedToolResultMessageStruct(msgs []ir.Message, tools []ToolSpecification, modelID, origin string) UserInputMessage {
+	var toolResults []ToolResult
+	var textParts []string
+
+	for _, msg := range msgs {
+		for _, part := range msg.Content {
+			if part.Type == ir.ContentTypeToolResult && part.ToolResult != nil {
+				toolResults = append(toolResults, buildToolResultStruct(part.ToolResult))
+			} else if part.Type == ir.ContentTypeText && part.Text != "" {
+				textParts = append(textParts, part.Text)
+			}
+		}
+	}
+
+	content := "Continue"
+	if len(textParts) > 0 {
+		content = strings.Join(textParts, "\n")
+	}
+
+	ctx := UserInputMessageContext{
+		ToolResults: toolResults,
+	}
+	if len(tools) > 0 {
+		ctx.Tools = tools
+	}
+
+	return UserInputMessage{
+		Content:                 content,
+		ModelId:                 modelID,
+		Origin:                  origin,
+		UserInputMessageContext: &ctx,
+	}
+}
+
+func buildToolResultStruct(tr *ir.ToolResultPart) ToolResult {
+	return ToolResult{
+		ToolUseId: tr.ToolCallID,
+		Status:    "success",
+		Content: []ToolResultContent{
+			{Text: ir.SanitizeText(tr.Result)},
+		},
+	}
+}
+
+func buildImageItemStruct(img *ir.ImagePart) ImageItem {
+	format := "png"
+	if parts := strings.Split(img.MimeType, "/"); len(parts) == 2 {
+		format = parts[1]
+	}
+	return ImageItem{
+		Format: format,
+		Source: ImageSource{Bytes: img.Data},
+	}
+}
+
+func injectSystemPromptStruct(prompt string, history *[]HistoryMessage, currentMsg *CurrentMessage) {
+	if prompt == "" {
+		return
+	}
+
+	// Attempt to prepend to current message if it's user input
+	if currentMsg != nil {
+		if currentMsg.UserInputMessage.Content != "" {
+			currentMsg.UserInputMessage.Content = prompt + "\n\n" + currentMsg.UserInputMessage.Content
+		} else {
+			currentMsg.UserInputMessage.Content = prompt
+		}
+		return
+	}
+
+	// Else prepend new history message (unlikely fallback)
+	*history = append([]HistoryMessage{{
+		UserInputMessage: &UserInputMessage{
+			Content: prompt,
+			ModelId: "auto",
+			Origin:  "CLI",
+		},
+	}}, *history...)
+}
+
+// Helpers from original code
 // removePrefill removes trailing assistant messages that are prefills (no tool_calls).
-// Prefill is a technique where the assistant message contains the start of the expected response
-// to guide the model's output format. Kiro doesn't support this.
 func removePrefill(messages []ir.Message) []ir.Message {
 	if len(messages) == 0 {
 		return messages
 	}
-
-	// Check if last message is an assistant message without tool_calls (prefill)
 	lastIdx := len(messages) - 1
 	lastMsg := messages[lastIdx]
-
 	if lastMsg.Role == ir.RoleAssistant && len(lastMsg.ToolCalls) == 0 {
-		// This is a prefill - remove it
-		// Note: We could alternatively append the prefill content to the previous user message
-		// as a hint, but for now we just remove it as Kiro doesn't support prefill
 		return messages[:lastIdx]
 	}
-
 	return messages
 }
 
@@ -200,208 +515,3 @@ func findTrailingStart(messages []ir.Message) int {
 	}
 	return trailingStart
 }
-
-func buildHistory(messages []ir.Message, tools []interface{}, modelID, origin string) []interface{} {
-	history := make([]interface{}, 0, len(messages))
-	for _, msg := range messages {
-		if m := convertMessage(msg, tools, modelID, origin, false); m != nil {
-			history = append(history, m)
-		}
-	}
-	return history
-}
-
-func convertMessage(msg ir.Message, tools []interface{}, modelID, origin string, isCurrent bool) map[string]interface{} {
-	switch msg.Role {
-	case ir.RoleUser:
-		return buildUserMessage(msg, tools, modelID, origin, isCurrent)
-	case ir.RoleAssistant:
-		return buildAssistantMessage(msg)
-	case ir.RoleTool:
-		return buildToolResultMessage(msg, modelID, origin)
-	}
-	return nil
-}
-
-func buildUserMessage(msg ir.Message, tools []interface{}, modelID, origin string, isCurrent bool) map[string]interface{} {
-	content := ir.CombineTextParts(msg)
-	var toolResults, images []interface{}
-	for _, part := range msg.Content {
-		if part.Type == ir.ContentTypeToolResult && part.ToolResult != nil {
-			toolResults = append(toolResults, buildToolResultItem(part.ToolResult))
-		} else if part.Type == ir.ContentTypeImage && part.Image != nil {
-			images = append(images, buildImageItem(part.Image))
-		}
-	}
-
-	if isCurrent && content == "" && len(toolResults) == 0 {
-		content = "Continue"
-	}
-
-	ctx := map[string]interface{}{}
-	if len(toolResults) > 0 {
-		ctx["toolResults"] = toolResults
-	}
-	if isCurrent && len(tools) > 0 {
-		ctx["tools"] = tools
-	}
-
-	userInput := map[string]interface{}{
-		"content": content, "modelId": modelID, "origin": origin, "userInputMessageContext": ctx,
-	}
-	if len(images) > 0 {
-		userInput["images"] = images
-	} else if isCurrent {
-		userInput["images"] = nil
-	}
-
-	return map[string]interface{}{"userInputMessage": userInput}
-}
-
-func buildAssistantMessage(msg ir.Message) map[string]interface{} {
-	toolUses := make([]interface{}, len(msg.ToolCalls))
-	for i, tc := range msg.ToolCalls {
-		toolUses[i] = map[string]interface{}{
-			"input": ir.ParseToolCallArgs(tc.Args), "name": tc.Name, "toolUseId": tc.ID,
-		}
-	}
-	assistantMsg := map[string]interface{}{"content": ir.CombineTextParts(msg), "toolUses": toolUses}
-	return map[string]interface{}{"assistantResponseMessage": assistantMsg}
-}
-
-func buildToolResultMessage(msg ir.Message, modelID, origin string) map[string]interface{} {
-	var toolResults []interface{}
-	for _, part := range msg.Content {
-		if part.Type == ir.ContentTypeToolResult && part.ToolResult != nil {
-			toolResults = append(toolResults, buildToolResultItem(part.ToolResult))
-		}
-	}
-	if len(toolResults) == 0 {
-		return nil
-	}
-	return map[string]interface{}{
-		"userInputMessage": map[string]interface{}{
-			"content": "Continue", "modelId": modelID, "origin": origin, "images": []interface{}{},
-			"userInputMessageContext": map[string]interface{}{"toolResults": toolResults},
-		},
-	}
-}
-
-func buildMergedToolResultMessage(msgs []ir.Message, tools []interface{}, modelID, origin string) map[string]interface{} {
-	var toolResults []interface{}
-	var textParts []string
-	for _, msg := range msgs {
-		for _, part := range msg.Content {
-			if part.Type == ir.ContentTypeToolResult && part.ToolResult != nil {
-				toolResults = append(toolResults, buildToolResultItem(part.ToolResult))
-			} else if part.Type == ir.ContentTypeText && part.Text != "" {
-				textParts = append(textParts, part.Text)
-			}
-		}
-	}
-	content := "Continue"
-	if len(textParts) > 0 {
-		content = strings.Join(textParts, "\n")
-	}
-	ctx := map[string]interface{}{"toolResults": toolResults}
-	if len(tools) > 0 {
-		ctx["tools"] = tools
-	}
-	return map[string]interface{}{
-		"userInputMessage": map[string]interface{}{
-			"content": content, "modelId": modelID, "origin": origin, "images": nil, "userInputMessageContext": ctx,
-		},
-	}
-}
-
-func buildToolResultItem(tr *ir.ToolResultPart) map[string]interface{} {
-	return map[string]interface{}{
-		"content": []interface{}{map[string]interface{}{"text": ir.SanitizeText(tr.Result)}},
-		"status":  "success", "toolUseId": tr.ToolCallID,
-	}
-}
-
-func buildImageItem(img *ir.ImagePart) map[string]interface{} {
-	format := "png"
-	if parts := strings.Split(img.MimeType, "/"); len(parts) == 2 {
-		format = parts[1]
-	}
-	return map[string]interface{}{"format": format, "source": map[string]interface{}{"bytes": img.Data}}
-}
-
-func injectSystemPrompt(prompt string, history *[]interface{}, currentMessage map[string]interface{}, modelID, origin string) {
-	if prompt == "" {
-		return
-	}
-	prepend := func(msg interface{}) bool {
-		if m, ok := msg.(map[string]interface{}); ok {
-			if userMsg, ok := m["userInputMessage"].(map[string]interface{}); ok {
-				if existing, _ := userMsg["content"].(string); existing != "" {
-					userMsg["content"] = prompt + "\n\n" + existing
-				} else {
-					userMsg["content"] = prompt
-				}
-				return true
-			}
-		}
-		return false
-	}
-
-	if len(*history) > 0 && prepend((*history)[0]) {
-		return
-	}
-	if currentMessage != nil && prepend(currentMessage) {
-		return
-	}
-
-	*history = append([]interface{}{map[string]interface{}{
-		"userInputMessage": map[string]interface{}{
-			"content": prompt, "modelId": modelID, "origin": origin,
-		},
-	}}, *history...)
-}
-
-// injectThinkingMode adds thinking mode configuration to the system prompt if enabled.
-// Kiro API supports official thinking/reasoning mode via <thinking_mode> tag.
-// When set to "enabled", Kiro returns reasoning content as official reasoningContentEvent.
-// Supports multiple detection methods:
-// - ThinkingConfig.IncludeThoughts = true
-// - ThinkingConfig.Budget > 0 or Budget == -1 (auto)
-// - ThinkingConfig.Effort != "" and != "none"
-func injectThinkingMode(thinking *ir.ThinkingConfig, systemPrompt string) string {
-	if thinking == nil {
-		return systemPrompt
-	}
-
-	// Determine if thinking should be enabled
-	thinkingEnabled := thinking.IncludeThoughts ||
-		thinking.Budget > 0 ||
-		thinking.Budget == -1 ||
-		(thinking.Effort != "" && thinking.Effort != "none")
-
-	if !thinkingEnabled {
-		return systemPrompt
-	}
-
-	// Determine max thinking length based on budget
-	// Default to 200000 tokens for extensive reasoning
-	maxThinkingLength := 200000
-	if thinking.Budget > 0 {
-		maxThinkingLength = thinking.Budget
-	}
-
-	// Build thinking mode hint
-	thinkingHint := "<thinking_mode>enabled</thinking_mode>\n<max_thinking_length>" +
-		strconv.Itoa(maxThinkingLength) + "</max_thinking_length>"
-
-	if systemPrompt != "" {
-		return thinkingHint + "\n\n" + systemPrompt
-	}
-	return thinkingHint
-}
-
-// Kiro thinking tag constants for response parsing
-const (
-	KiroThinkingStartTag = "<thinking>"
-	KiroThinkingEndTag   = "</thinking>"
-)

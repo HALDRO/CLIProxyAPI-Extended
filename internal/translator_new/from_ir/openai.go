@@ -80,53 +80,28 @@ func convertToChatCompletionsRequest(req *ir.UnifiedChatRequest) ([]byte, error)
 }
 
 // convertToResponsesAPIRequest builds JSON for /v1/responses endpoint.
-// IMPORTANT: Codex API (chatgpt.com/backend-api/codex/responses) strictly validates
-// the "instructions" field - it only accepts pre-registered Codex CLI prompts.
-// Arbitrary instructions are rejected with "Instructions are not valid" error.
-// Therefore, we do NOT set instructions here - it will be set by applyCodexSpecificFields
-// in codex_executor.go using misc.CodexInstructionsForModel().
-// System messages from client are converted to user messages in input[] array.
 func convertToResponsesAPIRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 	m := map[string]interface{}{"model": req.Model}
-	if req.Temperature != nil {
-		m["temperature"] = *req.Temperature
-	}
-	if req.TopP != nil {
-		m["top_p"] = *req.TopP
-	}
-	if req.MaxTokens != nil {
-		m["max_output_tokens"] = *req.MaxTokens
-	}
 
-	// NOTE: We intentionally do NOT set "instructions" here.
-	// Codex API validates instructions against a whitelist of registered prompts.
-	// Arbitrary instructions are rejected with "Instructions are not valid" error.
-	// System prompts from clients are already converted to user messages in input[] array,
-	// so we don't need to set instructions field at all.
-	// The model will receive the system prompt as the first message in input[].
+	// Generic OpenAI Responses API behavior:
+	// - system messages are passed via top-level "instructions" (if present)
+	// - role:system is not supported inside input[]
+	// - generation parameters (temperature/top_p/max_output_tokens/store/parallel_tool_calls)
+	//   are passed through when present in IR
+	if req.Instructions != "" {
+		m["instructions"] = req.Instructions
+	}
 
 	// Build tool call context: map tool_call_id -> tool_name for custom tool detection
-	// This is needed because tool results only contain tool_call_id, not tool_name
 	toolCallContext := buildToolCallContext(req.Messages, req.Tools)
 
-	// Build input array - convert system messages to user messages
-	// (Codex API doesn't support role:system in input[], and instructions are validated)
 	var input []interface{}
 	for _, msg := range req.Messages {
+		// System messages are NOT supported in Responses API input[].
+		// They must be passed via the top-level "instructions" field.
 		if msg.Role == ir.RoleSystem {
-			// Convert system message to user message for Codex compatibility
-			if text := ir.CombineTextParts(msg); text != "" {
-				input = append(input, map[string]interface{}{
-					"type": "message",
-					"role": "user",
-					"content": []interface{}{
-						map[string]interface{}{"type": "input_text", "text": text},
-					},
-				})
-			}
 			continue
 		}
-		// convertMessageToResponsesInputWithContext returns []interface{} for messages with multiple tool calls
 		items := convertMessageToResponsesInputWithContext(msg, toolCallContext)
 		input = append(input, items...)
 	}
@@ -141,12 +116,8 @@ func convertToResponsesAPIRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 	if len(req.Tools) > 0 {
 		m["tools"] = buildResponsesTools(req.Tools)
 	}
-
 	if req.ToolChoice != "" {
 		m["tool_choice"] = req.ToolChoice
-	}
-	if req.ParallelToolCalls != nil {
-		m["parallel_tool_calls"] = *req.ParallelToolCalls
 	}
 	if req.PreviousResponseID != "" {
 		m["previous_response_id"] = req.PreviousResponseID
@@ -157,8 +128,22 @@ func convertToResponsesAPIRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 	if req.PromptCacheKey != "" {
 		m["prompt_cache_key"] = req.PromptCacheKey
 	}
+
+	// Generic generation + storage controls.
+	if req.Temperature != nil {
+		m["temperature"] = *req.Temperature
+	}
+	if req.TopP != nil {
+		m["top_p"] = *req.TopP
+	}
+	if req.MaxTokens != nil {
+		m["max_output_tokens"] = *req.MaxTokens
+	}
 	if req.Store != nil {
 		m["store"] = *req.Store
+	}
+	if req.ParallelToolCalls != nil {
+		m["parallel_tool_calls"] = *req.ParallelToolCalls
 	}
 
 	return json.Marshal(m)

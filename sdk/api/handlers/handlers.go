@@ -16,12 +16,14 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/tidwall/sjson"
 	"golang.org/x/net/context"
 )
 
@@ -153,6 +155,17 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 		key = uuid.NewString()
 	}
 	return map[string]any{idempotencyKeyMetadataKey: key}
+}
+
+func normalizeModelInPayload(rawJSON []byte, normalizedModel string) []byte {
+	if len(rawJSON) == 0 || strings.TrimSpace(normalizedModel) == "" {
+		return rawJSON
+	}
+	out, err := sjson.SetBytes(rawJSON, "model", normalizedModel)
+	if err != nil {
+		return rawJSON
+	}
+	return out
 }
 
 func mergeMetadata(base, overlay map[string]any) map[string]any {
@@ -385,10 +398,11 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	if errMsg != nil {
 		return nil, errMsg
 	}
+	normalizedPayload := normalizeModelInPayload(cloneBytes(rawJSON), normalizedModel)
 	reqMeta := requestExecutionMetadata(ctx)
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
-		Payload: cloneBytes(rawJSON),
+		Payload: normalizedPayload,
 	}
 	opts := coreexecutor.Options{
 		Stream:          false,
@@ -423,10 +437,11 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	if errMsg != nil {
 		return nil, errMsg
 	}
+	normalizedPayload := normalizeModelInPayload(cloneBytes(rawJSON), normalizedModel)
 	reqMeta := requestExecutionMetadata(ctx)
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
-		Payload: cloneBytes(rawJSON),
+		Payload: normalizedPayload,
 	}
 	opts := coreexecutor.Options{
 		Stream:          false,
@@ -464,10 +479,11 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		close(errChan)
 		return nil, errChan
 	}
+	normalizedPayload := normalizeModelInPayload(cloneBytes(rawJSON), normalizedModel)
 	reqMeta := requestExecutionMetadata(ctx)
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
-		Payload: cloneBytes(rawJSON),
+		Payload: normalizedPayload,
 	}
 	opts := coreexecutor.Options{
 		Stream:          true,
@@ -605,6 +621,11 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 
+	normalizedBaseModel, providerID := registry.ParseProviderPrefixedModelID(baseModel)
+	if providerID != "" {
+		return []string{providerID}, restoreSuffix(normalizedBaseModel, parsed), nil
+	}
+
 	providers = util.GetProviderName(baseModel)
 	// Fallback: if baseModel has no provider but differs from resolvedModelName,
 	// try using the full model name. This handles edge cases where custom models
@@ -622,6 +643,13 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	// The thinking suffix is preserved in the model name itself, so no
 	// metadata-based configuration passing is needed.
 	return providers, resolvedModelName, nil
+}
+
+func restoreSuffix(normalizedBaseModel string, parsed thinking.SuffixResult) string {
+	if !parsed.HasSuffix {
+		return normalizedBaseModel
+	}
+	return fmt.Sprintf("%s(%s)", normalizedBaseModel, parsed.RawSuffix)
 }
 
 func cloneBytes(src []byte) []byte {

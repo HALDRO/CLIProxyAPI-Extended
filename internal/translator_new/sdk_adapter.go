@@ -33,8 +33,8 @@ func (a *Adapter) TranslateRequest(ctx context.Context, from, to sdktranslator.F
 	case "openai":
 		return executor.TranslateToOpenAI(cfg, from, model, payload, stream, nil, executor.FormatChatCompletions)
 	case "codex":
-		// Codex executor uses Responses API upstream.
-		return executor.TranslateToOpenAI(cfg, from, model, payload, stream, nil, executor.FormatResponsesAPI)
+		// Codex uses a stricter Responses API upstream.
+		return executor.TranslateToCodex(cfg, from, model, payload, stream, nil)
 	default:
 		return nil, fmt.Errorf("canonical translator: unsupported request target format %q", to.String())
 	}

@@ -272,6 +272,7 @@ func (e *KiroExecutorV2) Refresh(ctx context.Context, auth *coreauth.Auth) (*cor
 	}
 
 	newMeta := map[string]interface{}{
+		"type":          constant.Kiro,
 		"access_token":  newTokenData.AccessToken,
 		"refresh_token": newTokenData.RefreshToken,
 		"profile_arn":   newTokenData.ProfileArn,

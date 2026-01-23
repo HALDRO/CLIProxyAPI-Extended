@@ -252,6 +252,12 @@ func (s *KiroStreamState) processRegularEvents(parsed gjson.Result) []ir.Unified
 	data := parsed
 	if r := parsed.Get("assistantResponseEvent"); r.Exists() {
 		data = r
+	} else if r := parsed.Get("completionEvent"); r.Exists() {
+		data = r
+	} else if r := parsed.Get("chatResponseEvent"); r.Exists() {
+		data = r
+	} else if r := parsed.Get("message"); r.Exists() {
+		data = r
 	}
 
 	if content := data.Get("content").String(); content != "" {

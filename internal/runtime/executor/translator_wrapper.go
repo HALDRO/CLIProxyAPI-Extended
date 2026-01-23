@@ -139,6 +139,7 @@ func extractThinkingFromMetadata(metadata map[string]any) (budget *int, include 
 
 	return budget, include, hasOverride
 }
+
 // applyPayloadConfigToIR applies YAML payload config rules to the generated JSON
 func applyPayloadConfigToIR(cfg *config.Config, model string, payload []byte) []byte {
 	if cfg == nil || len(payload) == 0 {
@@ -524,11 +525,11 @@ func TranslateClaudeResponseStream(cfg *config.Config, to sdktranslator.Format, 
 // OpenAIStreamState maintains state for OpenAI → OpenAI streaming conversions.
 type OpenAIStreamState struct {
 	ReasoningCharsAccum int // Track accumulated reasoning characters for token estimation
-	// ToolCallIDMap maps Codex item_id to call_id for proper tool call ID consistency.
-	// Codex API uses item_id in delta events but call_id is what clients expect.
+	// ToolCallIDMap maps Responses API item_id to call_id for proper tool call ID consistency.
+	// Responses API uses item_id in delta events but call_id is what clients expect.
 	ToolCallIDMap      map[string]string
 	ToolCallSentHeader map[int]bool // Track if tool call header (ID/Name) has been sent
-	// ResponsesState holds state for Responses API streaming (used by Codex)
+	// ResponsesState holds state for Responses API streaming.
 	ResponsesState *from_ir.ResponsesStreamState
 	// ToolCallIsCustom tracks which tool call indices are custom tools
 	ToolCallIsCustom []int
@@ -552,6 +553,28 @@ func NewOpenAIStreamState() *OpenAIStreamState {
 		NextToolCallIndex:      0,
 		ClaudeState:            from_ir.NewClaudeStreamState(),
 	}
+}
+
+// TranslateToCodex converts request to Codex Responses API JSON using new translator.
+func TranslateToCodex(cfg *config.Config, from sdktranslator.Format, model string, payload []byte, streaming bool, metadata map[string]any) ([]byte, error) {
+	irReq, err := convertRequestToIR(from, model, payload, metadata)
+	if err != nil {
+		return nil, err
+	}
+	if irReq == nil {
+		return nil, fmt.Errorf("new translator: unsupported source format %q for Codex conversion", from.String())
+	}
+
+	codexJSON, err := from_ir.ToCodexRequest(irReq)
+	if err != nil {
+		return nil, err
+	}
+
+	if streaming {
+		codexJSON, _ = sjson.SetBytes(codexJSON, "stream", true)
+	}
+
+	return codexJSON, nil
 }
 
 // TranslateToOpenAI converts request to OpenAI API format (Chat Completions or Responses API) using new translator.
@@ -675,8 +698,8 @@ func TranslateOpenAIResponseStreamForced(to sdktranslator.Format, openaiChunk []
 				state.ReasoningCharsAccum += len(event.Reasoning)
 			}
 
-			// Handle tool call ID mapping for Codex API compatibility
-			// Codex uses item_id in delta events but call_id is what clients expect
+			// Handle tool call ID mapping for Responses API compatibility
+			// Responses API uses item_id in delta events but call_id is what clients expect
 			if event.ToolCall != nil {
 				if event.Type == ir.EventTypeToolCall && event.ToolCall.ItemID != "" && event.ToolCall.ID != "" {
 					// This is from response.output_item.added - save the mapping
