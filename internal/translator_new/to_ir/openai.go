@@ -632,18 +632,8 @@ func parseResponsesStreamEvent(eventType string, root gjson.Result) ([]ir.Unifie
 			events = append(events, ir.UnifiedEvent{Type: ir.EventTypeReasoningSummary, ReasoningSummary: text.String()})
 		}
 	case "response.function_call_arguments.delta":
-		// Forward delta events as-is.
-		// This restores standard streaming behavior for tool call arguments.
-		if delta := root.Get("delta"); delta.Exists() {
-			events = append(events, ir.UnifiedEvent{
-				Type: ir.EventTypeToolCallDelta,
-				ToolCall: &ir.ToolCall{
-					ItemID: root.Get("item_id").String(),
-					Args:   delta.String(),
-				},
-				ToolCallIndex: int(root.Get("output_index").Int()),
-			})
-		}
+		// Ignore deltas: we will emit a single ToolCallDelta on the corresponding
+		// response.function_call_arguments.done event so we can sanitize the full JSON.
 	case "response.custom_tool_call_input.delta":
 		// Handle custom tool call input delta (e.g., apply_patch with grammar format)
 		// Custom tools send raw text input instead of JSON arguments - no sanitization needed
@@ -661,7 +651,21 @@ func parseResponsesStreamEvent(eventType string, root gjson.Result) ([]ir.Unifie
 	case "response.custom_tool_call_input.done":
 		// Ignore done events to avoid duplication (same as function_call_arguments.done)
 	case "response.function_call_arguments.done":
-		// Ignore done events to avoid duplication.
+		// Emit full sanitized arguments on done.
+		if args := root.Get("arguments"); args.Exists() {
+			argsStr := args.String()
+			// Codex emits tool args that sometimes conflict with Cursor validation.
+			// Sanitize regardless of tool name here (tool name may not be known on deltas).
+			argsStr = sanitizeCodexGrepArgs("", argsStr)
+			events = append(events, ir.UnifiedEvent{
+				Type: ir.EventTypeToolCallDelta,
+				ToolCall: &ir.ToolCall{
+					ItemID: root.Get("item_id").String(),
+					Args:   argsStr,
+				},
+				ToolCallIndex: int(root.Get("output_index").Int()),
+			})
+		}
 	case "response.content_part.done":
 		// Similar to above, ignore done events for content parts to avoid duplication
 	case "response.output_item.done":
