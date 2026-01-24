@@ -63,7 +63,7 @@ func (p *GeminiProvider) applyGenerationConfig(root map[string]interface{}, req 
 
 	// Check if thinking mode is enabled (plan mode)
 	isPlanMode := false
-	if req.Thinking != nil && req.Thinking.Budget > 0 {
+	if req.Thinking != nil && (req.Thinking.Budget > 0 || req.Thinking.IncludeThoughts) {
 		p.applyThinkingConfig(genConfig, req)
 		isPlanMode = true
 	}
@@ -98,6 +98,8 @@ func (p *GeminiProvider) applyGenerationConfig(root map[string]interface{}, req 
 	}
 
 	if len(genConfig) > 0 {
+		// [FIX] Removed forced maxOutputTokens default as it exceeds limits for some models.
+		// Relying on upstream defaults or user provided values is safer.
 		root["generationConfig"] = genConfig
 	}
 	return nil
@@ -314,10 +316,22 @@ func (p *GeminiProvider) applyAssistantToolCalls(contents *[]interface{}, msg ir
 
 	for i, tc := range msg.ToolCalls {
 		argsJSON := ir.ValidateAndNormalizeJSON(tc.Args)
-		// Parse args to remove null values (Roo/Kilo compatibility)
+		// Parse args to remove null values (Roo/Kilo compatibility) AND fix types
 		var argsObj interface{}
 		if err := json.Unmarshal([]byte(argsJSON), &argsObj); err == nil {
 			argsObj = to_ir.RemoveNullsFromToolInput(argsObj)
+
+			// Apply FixToolCallArgs if we have tool definitions
+			if argsMap, ok := argsObj.(map[string]interface{}); ok {
+				// Find matching tool definition
+				for _, toolDef := range req.Tools {
+					if toolDef.Name == tc.Name {
+						to_ir.FixToolCallArgs(argsMap, toolDef.Parameters)
+						break
+					}
+				}
+			}
+
 			if cleanedJSON, err := json.Marshal(argsObj); err == nil {
 				argsJSON = string(cleanedJSON)
 			}
@@ -411,9 +425,9 @@ func getSessionID(req *ir.UnifiedChatRequest) string {
 }
 
 func resolveSignature(sessionID, reasoning, explicitSig string) string {
-	if sessionID != "" && reasoning != "" {
-		if cachedSig := cache.GetCachedSignature(sessionID, reasoning); cachedSig != "" {
-			return cachedSig
+	if sessionID != "" {
+		if sig := cache.GetSessionThoughtSignature(sessionID); sig != "" {
+			return sig
 		}
 	}
 	if explicitSig != "" && cache.HasValidSignature("", explicitSig) {
@@ -435,15 +449,9 @@ func (p *GeminiProvider) applyTools(root map[string]interface{}, req *ir.Unified
 		googleSearch = map[string]interface{}{}
 	}
 
-	if len(req.Tools) == 0 && googleSearch == nil {
-		return nil
-	}
-
-	toolNode := make(map[string]interface{})
-
+	// Filter out networking tools from functionDeclarations (they're handled via googleSearch)
+	var funcs []interface{}
 	if len(req.Tools) > 0 {
-		// Filter out networking tools from functionDeclarations (they're handled via googleSearch)
-		var funcs []interface{}
 		for _, t := range req.Tools {
 			// Skip networking tools - they're handled separately via googleSearch
 			if to_ir.IsNetworkingToolName(t.Name) {
@@ -452,25 +460,34 @@ func (p *GeminiProvider) applyTools(root map[string]interface{}, req *ir.Unified
 			// Build function declaration
 			funcDecl := map[string]interface{}{"name": t.Name, "description": t.Description}
 			if len(t.Parameters) == 0 {
-				funcDecl["parametersJsonSchema"] = map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
+				funcDecl["parameters"] = map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
 			} else {
 				// Use enhanced schema cleaning with $ref resolution, allOf merge, anyOf→enum
-				funcDecl["parametersJsonSchema"] = to_ir.CleanJsonSchemaEnhanced(copyMap(t.Parameters))
+				funcDecl["parameters"] = to_ir.CleanJsonSchemaEnhanced(copyMap(t.Parameters))
 			}
 			funcs = append(funcs, funcDecl)
 		}
-		if len(funcs) > 0 {
-			toolNode["functionDeclarations"] = funcs
-		}
 	}
 
-	if googleSearch != nil {
-		toolNode["googleSearch"] = googleSearch
+	if len(funcs) == 0 && googleSearch == nil {
+		return nil
 	}
 
-	root["tools"] = []interface{}{toolNode}
+	// Gemini expects tools to be a list of tool objects.
+	// Antigravity v1internal is strict and may reject mixed search+functions,
+	// so we only include googleSearch when there are no function declarations.
+	tools := make([]interface{}, 0, 2)
+	if len(funcs) > 0 {
+		tools = append(tools, map[string]interface{}{"functionDeclarations": funcs})
+	} else if googleSearch != nil {
+		tools = append(tools, map[string]interface{}{"googleSearch": googleSearch})
+	}
 
-	if len(req.Tools) > 0 {
+	if len(tools) > 0 {
+		root["tools"] = tools
+	}
+
+	if len(funcs) > 0 {
 		mode := "AUTO"
 		switch req.ToolChoice {
 		case "none":

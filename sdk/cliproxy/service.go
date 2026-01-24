@@ -382,6 +382,10 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 		}
 		return
 	case "antigravity":
+		if s.cfg != nil && s.cfg.UseCanonicalTranslator {
+			s.coreManager.RegisterExecutor(executor.NewAntigravityCanonicalExecutor(s.cfg))
+			return
+		}
 		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
 	case "claude":
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
