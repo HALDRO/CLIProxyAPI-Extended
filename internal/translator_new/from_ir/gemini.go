@@ -159,9 +159,9 @@ func (p *GeminiProvider) applyMessages(root map[string]interface{}, req *ir.Unif
 	//    a minimal synthetic Assistant->User pair.
 	messages := req.Messages
 	if req.Thinking != nil && (req.Thinking.IncludeThoughts || req.Thinking.Budget > 0) {
-		messages, _ = to_ir.EnsureThinkingConsistency(messages)
+		messages, _ = ir.EnsureThinkingConsistency(messages)
 		// Try to close broken tool loops for thinking models
-		messages, _ = to_ir.CloseToolLoopForThinking(messages)
+		messages, _ = ir.CloseToolLoopForThinking(messages)
 	}
 
 	shouldInjectHint := len(req.Tools) > 0 && req.Thinking != nil && req.Thinking.Budget > 0 && util.IsClaudeThinkingModel(req.Model)
@@ -319,14 +319,14 @@ func (p *GeminiProvider) applyAssistantToolCalls(contents *[]interface{}, msg ir
 		// Parse args to remove null values (Roo/Kilo compatibility) AND fix types
 		var argsObj interface{}
 		if err := json.Unmarshal([]byte(argsJSON), &argsObj); err == nil {
-			argsObj = to_ir.RemoveNullsFromToolInput(argsObj)
+			argsObj = ir.RemoveNullsFromToolInput(argsObj)
 
 			// Apply FixToolCallArgs if we have tool definitions
 			if argsMap, ok := argsObj.(map[string]interface{}); ok {
 				// Find matching tool definition
 				for _, toolDef := range req.Tools {
 					if toolDef.Name == tc.Name {
-						to_ir.FixToolCallArgs(argsMap, toolDef.Parameters)
+						ir.FixToolCallArgs(argsMap, toolDef.Parameters)
 						break
 					}
 				}
@@ -424,7 +424,7 @@ func getSessionID(req *ir.UnifiedChatRequest) string {
 	return ""
 }
 
-func resolveSignature(sessionID, reasoning, explicitSig string) string {
+func resolveSignature(sessionID, _, explicitSig string) string {
 	if sessionID != "" {
 		if sig := cache.GetSessionThoughtSignature(sessionID); sig != "" {
 			return sig
@@ -445,7 +445,7 @@ func (p *GeminiProvider) applyTools(root map[string]interface{}, req *ir.Unified
 	}
 
 	// Auto-detect networking tools and enable googleSearch if found
-	if googleSearch == nil && to_ir.DetectsNetworkingTool(req.Tools) {
+	if googleSearch == nil && ir.DetectsNetworkingTool(req.Tools) {
 		googleSearch = map[string]interface{}{}
 	}
 
@@ -454,7 +454,7 @@ func (p *GeminiProvider) applyTools(root map[string]interface{}, req *ir.Unified
 	if len(req.Tools) > 0 {
 		for _, t := range req.Tools {
 			// Skip networking tools - they're handled separately via googleSearch
-			if to_ir.IsNetworkingToolName(t.Name) {
+			if ir.IsNetworkingToolName(t.Name) {
 				continue
 			}
 			// Build function declaration
@@ -463,7 +463,7 @@ func (p *GeminiProvider) applyTools(root map[string]interface{}, req *ir.Unified
 				funcDecl["parameters"] = map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
 			} else {
 				// Use enhanced schema cleaning with $ref resolution, allOf merge, anyOf→enum
-				funcDecl["parameters"] = to_ir.CleanJsonSchemaEnhanced(copyMap(t.Parameters))
+				funcDecl["parameters"] = ir.CleanJsonSchemaEnhanced(copyMap(t.Parameters))
 			}
 			funcs = append(funcs, funcDecl)
 		}

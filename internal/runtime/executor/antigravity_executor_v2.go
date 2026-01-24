@@ -22,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/from_ir"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
@@ -35,24 +36,53 @@ const (
 	antigravityUserAgentDefault = "antigravity/1.104.0 darwin/arm64"
 )
 
-// AntigravityCanonicalExecutor is a clean executor that uses ONLY translator_new.
+// AntigravityExecutorV2 is a clean executor that uses ONLY translator_new.
 // It intentionally does not depend on sdk/translator legacy request translation.
 //
 // It targets Cloud Code Assist v1internal endpoints with Antigravity envelope:
 // {project, requestId, userAgent, requestType, model, request:{GeminiRequest}}
 //
 // Response unwrapping is handled via translator_wrapper.go (TranslateAntigravityResponse*).
-type AntigravityCanonicalExecutor struct {
+type AntigravityExecutorV2 struct {
 	cfg *config.Config
 }
 
-func NewAntigravityCanonicalExecutor(cfg *config.Config) *AntigravityCanonicalExecutor {
-	return &AntigravityCanonicalExecutor{cfg: cfg}
+func ensureAntigravityProjectID(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, accessToken string) error {
+	if auth == nil {
+		return nil
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	if auth.Metadata["project_id"] != nil {
+		return nil
+	}
+
+	token := strings.TrimSpace(accessToken)
+	if token == "" {
+		return nil
+	}
+
+	client := newProxyAwareHTTPClient(ctx, cfg, auth, 0)
+	projectID, errFetch := sdkAuth.FetchAntigravityProjectID(ctx, token, client)
+	if errFetch != nil {
+		return fmt.Errorf("fetch project id: %w", errFetch)
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return nil
+	}
+	auth.Metadata["project_id"] = projectID
+	return nil
 }
 
-func (e *AntigravityCanonicalExecutor) Identifier() string { return antigravityNewAuthType }
+func NewAntigravityExecutorV2(cfg *config.Config) *AntigravityExecutorV2 {
+	return &AntigravityExecutorV2{cfg: cfg}
+}
 
-func (e *AntigravityCanonicalExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
+func (e *AntigravityExecutorV2) Identifier() string { return antigravityNewAuthType }
+
+func (e *AntigravityExecutorV2) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
 	if req == nil {
 		return nil
 	}
@@ -67,7 +97,7 @@ func (e *AntigravityCanonicalExecutor) PrepareRequest(req *http.Request, auth *c
 	return nil
 }
 
-func (e *AntigravityCanonicalExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
+func (e *AntigravityExecutorV2) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
 	if req == nil {
 		return nil, fmt.Errorf("antigravity canonical executor: request is nil")
 	}
@@ -82,7 +112,7 @@ func (e *AntigravityCanonicalExecutor) HttpRequest(ctx context.Context, auth *cl
 	return httpClient.Do(httpReq)
 }
 
-func (e *AntigravityCanonicalExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+func (e *AntigravityExecutorV2) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
@@ -215,7 +245,7 @@ func (e *AntigravityCanonicalExecutor) Execute(ctx context.Context, auth *clipro
 	return resp, statusErr{code: http.StatusServiceUnavailable, msg: "antigravity canonical executor: no base url available"}
 }
 
-func (e *AntigravityCanonicalExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
+func (e *AntigravityExecutorV2) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
@@ -402,21 +432,21 @@ func (e *AntigravityCanonicalExecutor) ExecuteStream(ctx context.Context, auth *
 	return nil, statusErr{code: http.StatusServiceUnavailable, msg: "antigravity canonical executor: no base url available"}
 }
 
-func (e *AntigravityCanonicalExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+func (e *AntigravityExecutorV2) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	// Delegate to existing refresh implementation (OAuth refresh + project_id).
 	// This keeps request/response translation fully canonical while reusing proven auth logic.
 	old := NewAntigravityExecutor(e.cfg)
 	return old.Refresh(ctx, auth)
 }
 
-func (e *AntigravityCanonicalExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *AntigravityExecutorV2) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	// For now, call the upstream endpoint using the same request translation as legacy.
 	// This does not affect the canonical chat flow and can be refactored later.
 	old := NewAntigravityExecutor(e.cfg)
 	return old.CountTokens(ctx, auth, req, opts)
 }
 
-func (e *AntigravityCanonicalExecutor) ensureAccessToken(ctx context.Context, auth *cliproxyauth.Auth) (string, *cliproxyauth.Auth, error) {
+func (e *AntigravityExecutorV2) ensureAccessToken(ctx context.Context, auth *cliproxyauth.Auth) (string, *cliproxyauth.Auth, error) {
 	old := NewAntigravityExecutor(e.cfg)
 	return old.ensureAccessToken(ctx, auth)
 }

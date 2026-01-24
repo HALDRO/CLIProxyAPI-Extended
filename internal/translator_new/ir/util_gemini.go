@@ -1,4 +1,4 @@
-package to_ir
+package ir
 
 import (
 	"fmt"
@@ -6,139 +6,80 @@ import (
 	"strings"
 
 	"github.com/tidwall/gjson"
-
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
 )
 
-const (
-	SkipThoughtSignatureValidator = "skip_thought_signature_validator"
-	minThoughtSignatureLength     = 50
-)
+// SkipThoughtSignatureValidator is a special signature value that bypasses validation.
+const SkipThoughtSignatureValidator = "skip_thought_signature_validator"
 
-// EnsureThinkingConsistency ensures that if thinking is enabled, the last assistant message
-// starts with a thinking block. If not, it inserts a placeholder thinking block.
-func EnsureThinkingConsistency(messages []ir.Message) ([]ir.Message, bool) {
-	if checkLastAssistantHasThinking(messages) {
-		return messages, false
+// minThoughtSignatureLength is the minimum length for a valid thought signature.
+const minThoughtSignatureLength = 50
+
+// =============================================================================
+// JSON Schema Cleaning (Gemini specific)
+// =============================================================================
+
+// CleanJsonSchema removes fields not supported by Gemini from JSON Schema.
+func CleanJsonSchema(schema map[string]interface{}) map[string]interface{} {
+	if schema == nil {
+		return nil
 	}
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == ir.RoleAssistant {
-			placeholder := ir.ContentPart{
-				Type:             ir.ContentTypeReasoning,
-				Reasoning:        "",
-				ThoughtSignature: SkipThoughtSignatureValidator,
+
+	// Remove unsupported top-level keywords
+	unsupportedKeywords := []string{
+		"strict", "input_examples", "$schema", "$id", "$defs", "definitions",
+		"additionalProperties", "patternProperties", "unevaluatedProperties",
+		"minProperties", "maxProperties", "dependentRequired", "dependentSchemas",
+		"if", "then", "else", "not", "contentEncoding", "contentMediaType",
+		"deprecated", "readOnly", "writeOnly", "examples", "$comment",
+		"$vocabulary", "$anchor", "$dynamicRef", "$dynamicAnchor",
+		"propertyNames",
+	}
+	for _, kw := range unsupportedKeywords {
+		delete(schema, kw)
+	}
+
+	cleanNestedSchemas(schema)
+	return schema
+}
+
+func cleanNestedSchemas(schema map[string]interface{}) {
+	// Clean properties
+	if props, ok := schema["properties"].(map[string]interface{}); ok {
+		for _, v := range props {
+			if propSchema, ok := v.(map[string]interface{}); ok {
+				CleanJsonSchema(propSchema)
 			}
-			messages[i].Content = append([]ir.ContentPart{placeholder}, messages[i].Content...)
-			return messages, true
 		}
 	}
-	return messages, false
-}
 
-func checkLastAssistantHasThinking(messages []ir.Message) bool {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role != ir.RoleAssistant {
-			continue
-		}
-		if len(messages[i].Content) == 0 {
-			return false
-		}
-		return messages[i].Content[0].Type == ir.ContentTypeReasoning
-	}
-	return true
-}
-
-// CloseToolLoopForThinking closes a broken tool loop by injecting synthetic messages.
-// This prevents upstream errors when a client strips thinking blocks.
-func CloseToolLoopForThinking(messages []ir.Message) ([]ir.Message, bool) {
-	if len(messages) == 0 {
-		return messages, false
+	// Clean items (for arrays)
+	if items, ok := schema["items"].(map[string]interface{}); ok {
+		CleanJsonSchema(items)
 	}
 
-	// Find a trailing tool result without a preceding assistant tool call.
-	// If found, inject a minimal assistant message that starts with thinking.
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == ir.RoleTool {
-			// Find nearest preceding assistant
-			for j := i - 1; j >= 0; j-- {
-				if messages[j].Role == ir.RoleAssistant {
-					return messages, false
+	// Clean allOf, anyOf, oneOf
+	for _, key := range []string{"allOf", "anyOf", "oneOf"} {
+		if arr, ok := schema[key].([]interface{}); ok {
+			for _, item := range arr {
+				if itemSchema, ok := item.(map[string]interface{}); ok {
+					CleanJsonSchema(itemSchema)
 				}
 			}
-			// No assistant before tool result: inject assistant placeholder at start.
-			placeholder := ir.Message{
-				Role: ir.RoleAssistant,
-				Content: []ir.ContentPart{{
-					Type:             ir.ContentTypeReasoning,
-					Reasoning:        "",
-					ThoughtSignature: SkipThoughtSignatureValidator,
-				}},
-			}
-			out := make([]ir.Message, 0, len(messages)+1)
-			out = append(out, placeholder)
-			out = append(out, messages...)
-			return out, true
 		}
 	}
-	return messages, false
-}
 
-var networkingToolNames = map[string]bool{
-	"web_search":              true,
-	"google_search":           true,
-	"web_search_20250305":     true,
-	"google_search_retrieval": true,
-	"googleSearch":            true,
-	"googleSearchRetrieval":   true,
-}
-
-func IsNetworkingToolName(name string) bool {
-	return networkingToolNames[name]
-}
-
-func DetectsNetworkingTool(tools []ir.ToolDefinition) bool {
-	for _, tool := range tools {
-		if networkingToolNames[tool.Name] {
-			return true
+	// Flatten type arrays like ["string", "null"] to just "string"
+	if typeVal, ok := schema["type"].([]interface{}); ok && len(typeVal) > 0 {
+		for _, t := range typeVal {
+			if tStr, ok := t.(string); ok && tStr != "null" {
+				schema["type"] = tStr
+				break
+			}
 		}
-	}
-	return false
-}
-
-func RemoveNullsFromToolInput(input any) any {
-	switch v := input.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(v))
-		for k, val := range v {
-			if val == nil {
-				continue
-			}
-			cleaned := RemoveNullsFromToolInput(val)
-			if cleaned == nil {
-				continue
-			}
-			out[k] = cleaned
-		}
-		return out
-	case []any:
-		out := make([]any, 0, len(v))
-		for _, item := range v {
-			if item == nil {
-				continue
-			}
-			cleaned := RemoveNullsFromToolInput(item)
-			if cleaned == nil {
-				continue
-			}
-			out = append(out, cleaned)
-		}
-		return out
-	default:
-		return input
 	}
 }
 
-// CleanJsonSchemaEnhanced applies extra compatibility cleanup on top of ir.CleanJsonSchema.
+// CleanJsonSchemaEnhanced applies extra compatibility cleanup on top of CleanJsonSchema.
 // It matches the robust logic from src_NiceAG/proxy/common/json_schema.rs:
 // 1. $ref flattening (recursive resolution)
 // 2. allOf merging
@@ -636,20 +577,137 @@ func deepCopyValue(v any) any {
 	}
 }
 
-func FilterInvalidThinkingBlocks(messages []ir.Message, _ string) []ir.Message {
+// =============================================================================
+// Mapping Helpers (Gemini)
+// =============================================================================
+
+// DefaultGeminiSafetySettings returns the default safety settings for Gemini API.
+func DefaultGeminiSafetySettings() []map[string]string {
+	return []map[string]string{
+		{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
+		{"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},
+		{"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF"},
+		{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF"},
+		{"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"},
+	}
+}
+
+// MapGeminiFinishReason converts Gemini finishReason to FinishReason.
+func MapGeminiFinishReason(geminiReason string) FinishReason {
+	switch strings.ToUpper(geminiReason) {
+	case "STOP", "FINISH_REASON_UNSPECIFIED", "UNKNOWN":
+		return FinishReasonStop
+	case "MAX_TOKENS":
+		return FinishReasonLength
+	case "SAFETY", "RECITATION":
+		return FinishReasonContentFilter
+	case "MALFORMED_FUNCTION_CALL":
+		return FinishReasonToolCalls
+	default:
+		return FinishReasonUnknown
+	}
+}
+
+// MapFinishReasonToGemini converts FinishReason to Gemini format.
+func MapFinishReasonToGemini(reason FinishReason) string {
+	switch reason {
+	case FinishReasonStop, FinishReasonToolCalls:
+		return "STOP"
+	case FinishReasonLength:
+		return "MAX_TOKENS"
+	case FinishReasonContentFilter:
+		return "SAFETY"
+	default:
+		return "OTHER"
+	}
+}
+
+// =============================================================================
+// Thinking Block Helpers (Gemini/Antigravity)
+// =============================================================================
+
+// EnsureThinkingConsistency ensures that if thinking is enabled, the last assistant message
+// starts with a thinking block. If not, it inserts a placeholder thinking block.
+func EnsureThinkingConsistency(messages []Message) ([]Message, bool) {
+	if checkLastAssistantHasThinking(messages) {
+		return messages, false
+	}
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == RoleAssistant {
+			placeholder := ContentPart{
+				Type:             ContentTypeReasoning,
+				Reasoning:        "",
+				ThoughtSignature: SkipThoughtSignatureValidator,
+			}
+			messages[i].Content = append([]ContentPart{placeholder}, messages[i].Content...)
+			return messages, true
+		}
+	}
+	return messages, false
+}
+
+func checkLastAssistantHasThinking(messages []Message) bool {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role != RoleAssistant {
+			continue
+		}
+		if len(messages[i].Content) == 0 {
+			return false
+		}
+		return messages[i].Content[0].Type == ContentTypeReasoning
+	}
+	return true
+}
+
+// CloseToolLoopForThinking closes a broken tool loop by injecting synthetic messages.
+// This prevents upstream errors when a client strips thinking blocks.
+func CloseToolLoopForThinking(messages []Message) ([]Message, bool) {
+	if len(messages) == 0 {
+		return messages, false
+	}
+
+	// Find a trailing tool result without a preceding assistant tool call.
+	// If found, inject a minimal assistant message that starts with thinking.
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == RoleTool {
+			// Find nearest preceding assistant
+			for j := i - 1; j >= 0; j-- {
+				if messages[j].Role == RoleAssistant {
+					return messages, false
+				}
+			}
+			// No assistant before tool result: inject assistant placeholder at start.
+			placeholder := Message{
+				Role: RoleAssistant,
+				Content: []ContentPart{{
+					Type:             ContentTypeReasoning,
+					Reasoning:        "",
+					ThoughtSignature: SkipThoughtSignatureValidator,
+				}},
+			}
+			out := make([]Message, 0, len(messages)+1)
+			out = append(out, placeholder)
+			out = append(out, messages...)
+			return out, true
+		}
+	}
+	return messages, false
+}
+
+func FilterInvalidThinkingBlocks(messages []Message, _ string) []Message {
 	if len(messages) == 0 {
 		return messages
 	}
-	out := make([]ir.Message, 0, len(messages))
+	out := make([]Message, 0, len(messages))
 	for _, msg := range messages {
-		if msg.Role != ir.RoleAssistant {
+		if msg.Role != RoleAssistant {
 			out = append(out, msg)
 			continue
 		}
 		filtered := msg
 		filtered.Content = nil
 		for _, part := range msg.Content {
-			if part.Type != ir.ContentTypeReasoning {
+			if part.Type != ContentTypeReasoning {
 				filtered.Content = append(filtered.Content, part)
 				continue
 			}
@@ -664,20 +722,20 @@ func FilterInvalidThinkingBlocks(messages []ir.Message, _ string) []ir.Message {
 	return out
 }
 
-func RemoveTrailingUnsignedThinking(messages []ir.Message, _ string) []ir.Message {
+func RemoveTrailingUnsignedThinking(messages []Message, _ string) []Message {
 	if len(messages) == 0 {
 		return messages
 	}
-	out := make([]ir.Message, 0, len(messages))
+	out := make([]Message, 0, len(messages))
 	for _, msg := range messages {
-		if msg.Role != ir.RoleAssistant {
+		if msg.Role != RoleAssistant {
 			out = append(out, msg)
 			continue
 		}
 		trimmed := msg
 		for len(trimmed.Content) > 0 {
 			last := trimmed.Content[len(trimmed.Content)-1]
-			if last.Type != ir.ContentTypeReasoning {
+			if last.Type != ContentTypeReasoning {
 				break
 			}
 			sig := strings.TrimSpace(last.ThoughtSignature)
@@ -689,6 +747,32 @@ func RemoveTrailingUnsignedThinking(messages []ir.Message, _ string) []ir.Messag
 		out = append(out, trimmed)
 	}
 	return out
+}
+
+// =============================================================================
+// Tool Helpers (Networking / Compatibility)
+// =============================================================================
+
+var networkingToolNames = map[string]bool{
+	"web_search":              true,
+	"google_search":           true,
+	"web_search_20250305":     true,
+	"google_search_retrieval": true,
+	"googleSearch":            true,
+	"googleSearchRetrieval":   true,
+}
+
+func IsNetworkingToolName(name string) bool {
+	return networkingToolNames[name]
+}
+
+func DetectsNetworkingTool(tools []ToolDefinition) bool {
+	for _, tool := range tools {
+		if networkingToolNames[tool.Name] {
+			return true
+		}
+	}
+	return false
 }
 
 // DetectsNetworkingToolFromRaw checks for networking tools in raw JSON tool definitions.
@@ -809,9 +893,10 @@ func fixSingleArg(val any, schema map[string]any) any {
 				return false
 			}
 		} else if n, ok := val.(float64); ok {
-			if n == 1 {
+			switch n {
+			case 1:
 				return true
-			} else if n == 0 {
+			case 0:
 				return false
 			}
 		}
@@ -822,4 +907,71 @@ func fixSingleArg(val any, schema map[string]any) any {
 	}
 
 	return val
+}
+
+// RemoveNullsFromToolInput recursively removes nil values from tool input maps/arrays.
+// This is often required for clients (like Roo/Kilo) that send explicit nulls which some providers (Gemini) reject.
+func RemoveNullsFromToolInput(input any) any {
+	switch v := input.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for k, val := range v {
+			if val == nil {
+				continue
+			}
+			cleaned := RemoveNullsFromToolInput(val)
+			if cleaned == nil {
+				continue
+			}
+			out[k] = cleaned
+		}
+		return out
+	case []any:
+		out := make([]any, 0, len(v))
+		for _, item := range v {
+			if item == nil {
+				continue
+			}
+			cleaned := RemoveNullsFromToolInput(item)
+			if cleaned == nil {
+				continue
+			}
+			out = append(out, cleaned)
+		}
+		return out
+	default:
+		return input
+	}
+}
+
+// DeepCleanUndefined recursively removes "[undefined]" string values from maps.
+// Some clients like Cherry Studio inject "[undefined]" as placeholder values,
+// which can cause Gemini API validation errors.
+func DeepCleanUndefined(data map[string]interface{}) {
+	if data == nil {
+		return
+	}
+	for key, val := range data {
+		switch v := val.(type) {
+		case string:
+			if v == "[undefined]" {
+				delete(data, key)
+			}
+		case map[string]interface{}:
+			DeepCleanUndefined(v)
+		case []interface{}:
+			deepCleanUndefinedArray(v)
+		}
+	}
+}
+
+// deepCleanUndefinedArray recursively cleans arrays of maps.
+func deepCleanUndefinedArray(arr []interface{}) {
+	for _, item := range arr {
+		if m, ok := item.(map[string]interface{}); ok {
+			DeepCleanUndefined(m)
+		} else if nested, ok := item.([]interface{}); ok {
+			deepCleanUndefinedArray(nested)
+		}
+	}
 }

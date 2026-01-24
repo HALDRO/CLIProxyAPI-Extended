@@ -8,7 +8,6 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/to_ir"
 )
 
 const antigravityIdentity = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.\n" +
@@ -75,7 +74,7 @@ func (p *AntigravityProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte
 							// Clean parameters schema
 							if params, ok := declMap["parameters"].(map[string]any); ok {
 								// Re-run schema cleaner (enhanced) to be safe
-								declMap["parameters"] = to_ir.CleanJsonSchemaEnhanced(params)
+								declMap["parameters"] = ir.CleanJsonSchemaEnhanced(params)
 							}
 							cleanedDecls = append(cleanedDecls, declMap)
 						}

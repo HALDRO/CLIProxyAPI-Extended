@@ -18,7 +18,6 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/to_ir"
 )
 
 // Claude user tracking
@@ -353,7 +352,7 @@ func buildClaudeContentParts(msg ir.Message, includeToolCalls bool) []interface{
 			toolUse := map[string]interface{}{"type": ir.ClaudeBlockToolUse, "id": tc.ID, "name": tc.Name}
 			input := ir.ParseToolCallArgs(tc.Args)
 			// Remove null values from tool input (Roo/Kilo compatibility)
-			cleanedInput := to_ir.RemoveNullsFromToolInput(input)
+			cleanedInput := ir.RemoveNullsFromToolInput(input)
 			if cleanedMap, ok := cleanedInput.(map[string]interface{}); ok {
 				toolUse["input"] = cleanedMap
 			} else {

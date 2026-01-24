@@ -339,20 +339,19 @@ func convertGeminiEventsToChunks(events []ir.UnifiedEvent, to sdktranslator.Form
 		for i := range events {
 			event := &events[i]
 
-			// Track content
-			switch event.Type {
-			case ir.EventTypeToken:
-				if event.Content != "" {
-					state.HasContent = true
-				}
-			case ir.EventTypeReasoning:
-				if event.Reasoning != "" {
-					state.HasContent = true
-					state.ReasoningCharsAccum += len(event.Reasoning)
-				}
-			case ir.EventTypeToolCall:
-				state.HasContent = true
-			}
+	switch event.Type {
+	case ir.EventTypeToken:
+		if event.Content != "" {
+			state.HasContent = true
+		}
+	case ir.EventTypeReasoning:
+		if event.Reasoning != "" {
+			state.HasContent = true
+			state.ReasoningCharsAccum += len(event.Reasoning)
+		}
+	case ir.EventTypeToolCall:
+		state.HasContent = true
+	}
 
 			// Handle finish event logic
 			if event.Type == ir.EventTypeFinish {

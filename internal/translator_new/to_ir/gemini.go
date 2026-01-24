@@ -77,8 +77,8 @@ func ParseGeminiResponseMeta(rawJSON []byte) ([]ir.Message, *ir.Usage, *ir.Respo
 	// Filter invalid thinking blocks and remove trailing unsigned thinking
 	// Note: model parameter not available here, pass empty string
 	messages := []ir.Message{msg}
-	messages = FilterInvalidThinkingBlocks(messages, "")
-	messages = RemoveTrailingUnsignedThinking(messages, "")
+	messages = ir.FilterInvalidThinkingBlocks(messages, "")
+	messages = ir.RemoveTrailingUnsignedThinking(messages, "")
 
 	return messages, usage, meta, nil
 }
@@ -171,9 +171,9 @@ func ParseGeminiChunk(rawJSON []byte) ([]ir.UnifiedEvent, error) {
 
 			// Handle MALFORMED_FUNCTION_CALL - Gemini sometimes returns malformed tool calls
 			// Skip these for now as they require special parsing
-				if frStr == "MALFORMED_FUNCTION_CALL" {
-					// Skip malformed function calls - no event emitted
-				}
+			if frStr == "MALFORMED_FUNCTION_CALL" {
+				// Skip malformed function calls - no event emitted
+			}
 		}
 	}
 

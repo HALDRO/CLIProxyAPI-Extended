@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/to_ir"
 )
 
 // OpenAIRequestFormat specifies which OpenAI API format to generate.
@@ -662,7 +661,7 @@ func buildOpenAIAssistantMessage(msg ir.Message) map[string]interface{} {
 		for i, tc := range msg.ToolCalls {
 			// Encode thoughtSignature into tool call ID for round-trip preservation
 			// This allows signature to survive even if clients strip custom fields
-			encodedID := to_ir.EncodeToolIDWithSignature(tc.ID, tc.ThoughtSignature)
+			encodedID := ir.EncodeToolIDWithSignature(tc.ID, tc.ThoughtSignature)
 			tcs[i] = map[string]interface{}{
 				"id": encodedID, "type": "function",
 				"function": map[string]interface{}{"name": tc.Name, "arguments": tc.Args},

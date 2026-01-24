@@ -306,7 +306,7 @@ func parseResponsesInputItem(item gjson.Result) *ir.Message {
 		}
 	case "function_call_output":
 		// Decode thoughtSignature from tool call ID if encoded
-		callID, signature := DecodeToolIDAndSignature(item.Get("call_id").String())
+		callID, signature := ir.DecodeToolIDAndSignature(item.Get("call_id").String())
 		return &ir.Message{
 			Role: ir.RoleTool,
 			Content: []ir.ContentPart{{
@@ -319,7 +319,7 @@ func parseResponsesInputItem(item gjson.Result) *ir.Message {
 	case "custom_tool_call_output":
 		// Custom tool results - same structure as function_call_output but for custom tools
 		// Decode thoughtSignature from tool call ID if encoded
-		callID, signature := DecodeToolIDAndSignature(item.Get("call_id").String())
+		callID, signature := ir.DecodeToolIDAndSignature(item.Get("call_id").String())
 		return &ir.Message{
 			Role: ir.RoleTool,
 			Content: []ir.ContentPart{{
@@ -740,7 +740,7 @@ func parseOpenAIMessage(m gjson.Result) ir.Message {
 		}
 		// Decode thoughtSignature from tool call ID if encoded
 		// This restores the original ID and extracts the signature for round-trip preservation
-		originalID, signature := DecodeToolIDAndSignature(toolCallID)
+		originalID, signature := ir.DecodeToolIDAndSignature(toolCallID)
 		msg.Content = append(msg.Content, ir.ContentPart{
 			Type: ir.ContentTypeToolResult,
 			ToolResult: &ir.ToolResultPart{
@@ -803,7 +803,7 @@ func parseOpenAIContentPart(item gjson.Result, msg *ir.Message) *ir.ContentPart 
 	case "tool_result":
 		msg.Role = ir.RoleTool
 		// Decode thoughtSignature from tool_use_id if encoded
-		toolUseID, signature := DecodeToolIDAndSignature(item.Get("tool_use_id").String())
+		toolUseID, signature := ir.DecodeToolIDAndSignature(item.Get("tool_use_id").String())
 		return &ir.ContentPart{
 			Type: ir.ContentTypeToolResult,
 			ToolResult: &ir.ToolResultPart{

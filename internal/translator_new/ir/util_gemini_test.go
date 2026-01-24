@@ -1,4 +1,4 @@
-package to_ir
+package ir
 
 import (
 	"encoding/json"

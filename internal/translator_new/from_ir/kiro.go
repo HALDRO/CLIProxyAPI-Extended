@@ -265,13 +265,14 @@ func processMessagesStruct(messages []ir.Message, tools []ToolSpecification, mod
 func buildHistoryStruct(messages []ir.Message, tools []ToolSpecification, modelID, origin string) []HistoryMessage {
 	history := make([]HistoryMessage, 0, len(messages))
 	for _, msg := range messages {
-		if msg.Role == ir.RoleUser {
+		switch msg.Role {
+		case ir.RoleUser:
 			uMsg := buildUserMessageStruct(msg, tools, modelID, origin, false)
 			history = append(history, HistoryMessage{UserInputMessage: uMsg})
-		} else if msg.Role == ir.RoleAssistant {
+		case ir.RoleAssistant:
 			aMsg := buildAssistantMessageStruct(msg)
 			history = append(history, HistoryMessage{AssistantResponseMessage: aMsg})
-		} else if msg.Role == ir.RoleTool {
+		case ir.RoleTool:
 			// Tool results in history are treated as UserInputMessage in Kiro
 			uMsg := buildToolResultMessageStruct(msg, modelID, origin)
 			if uMsg != nil {
