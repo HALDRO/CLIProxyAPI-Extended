@@ -131,7 +131,8 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	}
 
 	basePayload = fixGeminiCLIImageAspectRatio(baseModel, basePayload)
-	basePayload = applyPayloadConfigWithRoot(e.cfg, baseModel, "gemini", "request", basePayload, originalTranslated)
+	requestedModel := payloadRequestedModel(opts, req.Model)
+	basePayload = applyPayloadConfigWithRoot(e.cfg, baseModel, "gemini", "request", basePayload, originalTranslated, requestedModel)
 
 	action := "generateContent"
 	if req.Metadata != nil {
@@ -231,7 +232,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 
 		lastStatus = httpResp.StatusCode
 		lastBody = append([]byte(nil), data...)
-		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		if httpResp.StatusCode == 429 {
 			if idx+1 < len(models) {
 				log.Debugf("gemini cli executor: rate limited, retrying with next model: %s", models[idx+1])
@@ -285,7 +286,8 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	}
 
 	basePayload = fixGeminiCLIImageAspectRatio(baseModel, basePayload)
-	basePayload = applyPayloadConfigWithRoot(e.cfg, baseModel, "gemini", "request", basePayload, originalTranslated)
+	requestedModel := payloadRequestedModel(opts, req.Model)
+	basePayload = applyPayloadConfigWithRoot(e.cfg, baseModel, "gemini", "request", basePayload, originalTranslated, requestedModel)
 
 	projectID := resolveGeminiProjectID(auth)
 
@@ -365,7 +367,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			appendAPIResponseChunk(ctx, e.cfg, data)
 			lastStatus = httpResp.StatusCode
 			lastBody = append([]byte(nil), data...)
-			log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+			logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 			if httpResp.StatusCode == 429 {
 				if idx+1 < len(models) {
 					log.Debugf("gemini cli executor: rate limited, retrying with next model: %s", models[idx+1])

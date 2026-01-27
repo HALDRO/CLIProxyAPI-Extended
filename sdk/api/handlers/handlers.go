@@ -400,6 +400,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	}
 	normalizedPayload := normalizeModelInPayload(cloneBytes(rawJSON), normalizedModel)
 	reqMeta := requestExecutionMetadata(ctx)
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
 		Payload: normalizedPayload,
@@ -439,6 +440,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	}
 	normalizedPayload := normalizeModelInPayload(cloneBytes(rawJSON), normalizedModel)
 	reqMeta := requestExecutionMetadata(ctx)
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
 		Payload: normalizedPayload,
@@ -481,6 +483,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	}
 	normalizedPayload := normalizeModelInPayload(cloneBytes(rawJSON), normalizedModel)
 	reqMeta := requestExecutionMetadata(ctx)
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
 		Payload: normalizedPayload,

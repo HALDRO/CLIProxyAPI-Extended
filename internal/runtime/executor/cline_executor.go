@@ -97,7 +97,7 @@ func (e *ClineExecutor) Execute(ctx context.Context, auth *coreauth.Auth, req cl
 		return resp, err
 	}
 
-	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated)
+	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, payloadRequestedModel(opts, baseModel))
 
 	url := strings.TrimSuffix(baseURL, "/") + "/api/v1/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -199,7 +199,7 @@ func (e *ClineExecutor) ExecuteStream(ctx context.Context, auth *coreauth.Auth, 
 		return nil, err
 	}
 
-	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated)
+	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, payloadRequestedModel(opts, baseModel))
 
 	url := strings.TrimSuffix(baseURL, "/") + "/api/v1/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
