@@ -3,6 +3,7 @@
  * @description Provides core utilities for the Canonical IR translator architecture:
  *              - UUID/Tool Call ID generation
  *              - Text sanitization (UTF-8 cleanup)
+ *              - Deep copying of maps and slices
  *              - JSON Schema cleaning (Claude compatibility)
  *              - ThoughtSignature encoding in tool IDs (round-trip preservation)
  *              - Provider mapping helpers (FinishReason, Role, Effort)
@@ -83,6 +84,46 @@ func DecodeToolIDAndSignature(encoded string) (id, signature string) {
 	id = strings.TrimSpace(encoded[:idx])
 	signature = strings.TrimSpace(encoded[idx+len(marker):])
 	return id, signature
+}
+
+// =============================================================================
+// Deep Copy Utilities
+// =============================================================================
+
+// CopyMap creates a deep copy of a map.
+func CopyMap(m map[string]interface{}) map[string]interface{} {
+	if m == nil {
+		return nil
+	}
+	result := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		result[k] = DeepCopy(v)
+	}
+	return result
+}
+
+// CopySlice creates a deep copy of a slice.
+func CopySlice(s []interface{}) []interface{} {
+	if s == nil {
+		return nil
+	}
+	result := make([]interface{}, len(s))
+	for i, v := range s {
+		result[i] = DeepCopy(v)
+	}
+	return result
+}
+
+// DeepCopy creates a deep copy of any value (map, slice, or primitive).
+func DeepCopy(v interface{}) interface{} {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		return CopyMap(val)
+	case []interface{}:
+		return CopySlice(val)
+	default:
+		return val
+	}
 }
 
 // =============================================================================

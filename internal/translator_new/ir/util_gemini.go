@@ -559,22 +559,7 @@ func extractBestSchemaFromUnion(unionArray []any) any {
 }
 
 func deepCopyValue(v any) any {
-	switch val := v.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(val))
-		for k, child := range val {
-			out[k] = deepCopyValue(child)
-		}
-		return out
-	case []any:
-		out := make([]any, len(val))
-		for i, child := range val {
-			out[i] = deepCopyValue(child)
-		}
-		return out
-	default:
-		return val
-	}
+	return DeepCopy(v)
 }
 
 // =============================================================================

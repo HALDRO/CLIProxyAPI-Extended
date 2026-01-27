@@ -39,8 +39,7 @@ func convertToChatCompletionsRequest(req *ir.UnifiedChatRequest) ([]byte, error)
 	}
 	if req.Temperature != nil {
 		m["temperature"] = *req.Temperature
-	}
-	if req.TopP != nil {
+	} else if req.TopP != nil {
 		m["top_p"] = *req.TopP
 	}
 	if req.MaxTokens != nil {
@@ -131,8 +130,7 @@ func convertToResponsesAPIRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 	// Generic generation + storage controls.
 	if req.Temperature != nil {
 		m["temperature"] = *req.Temperature
-	}
-	if req.TopP != nil {
+	} else if req.TopP != nil {
 		m["top_p"] = *req.TopP
 	}
 	if req.MaxTokens != nil {

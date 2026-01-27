@@ -58,7 +58,11 @@ func (p *GeminiProvider) applyGenerationConfig(root map[string]interface{}, req 
 		genConfig["topK"] = *req.TopK
 	}
 	if req.MaxTokens != nil {
-		genConfig["maxOutputTokens"] = *req.MaxTokens
+		// [FIX] Ensure we remove maxOutputTokens if it exceeds 8192 to prevent 400 errors
+		// This matches Antigravity behavior for stability.
+		if *req.MaxTokens <= 8192 {
+			genConfig["maxOutputTokens"] = *req.MaxTokens
+		}
 	}
 
 	// Check if thinking mode is enabled (plan mode)
@@ -98,8 +102,6 @@ func (p *GeminiProvider) applyGenerationConfig(root map[string]interface{}, req 
 	}
 
 	if len(genConfig) > 0 {
-		// [FIX] Removed forced maxOutputTokens default as it exceeds limits for some models.
-		// Relying on upstream defaults or user provided values is safer.
 		root["generationConfig"] = genConfig
 	}
 	return nil
@@ -463,7 +465,22 @@ func (p *GeminiProvider) applyTools(root map[string]interface{}, req *ir.Unified
 				funcDecl["parameters"] = map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
 			} else {
 				// Use enhanced schema cleaning with $ref resolution, allOf merge, anyOf→enum
-				funcDecl["parameters"] = ir.CleanJsonSchemaEnhanced(copyMap(t.Parameters))
+				// Step 1: Enhanced cleaning ($ref resolution, allOf merge, etc.)
+				cleaned := ir.CleanJsonSchemaEnhanced(ir.CopyMap(t.Parameters))
+				
+				// Step 2: Gemini-specific cleaning (removes nullable, title, placeholder fields)
+				// This ensures full parity with Antigravity logic.
+				if jsonBytes, err := json.Marshal(cleaned); err == nil {
+					cleanedStr := util.CleanJSONSchemaForGemini(string(jsonBytes))
+					var finalSchema map[string]interface{}
+					if err := json.Unmarshal([]byte(cleanedStr), &finalSchema); err == nil {
+						funcDecl["parameters"] = finalSchema
+					} else {
+						funcDecl["parameters"] = cleaned
+					}
+				} else {
+					funcDecl["parameters"] = cleaned
+				}
 			}
 			funcs = append(funcs, funcDecl)
 		}

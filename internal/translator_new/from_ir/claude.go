@@ -18,6 +18,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 )
 
 // Claude user tracking
@@ -93,8 +94,7 @@ func (p *ClaudeProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, err
 	}
 	if req.Temperature != nil {
 		root["temperature"] = *req.Temperature
-	}
-	if req.TopP != nil {
+	} else if req.TopP != nil {
 		root["top_p"] = *req.TopP
 	}
 	if req.TopK != nil {
@@ -369,7 +369,21 @@ func buildTools(tools []ir.ToolDefinition) []interface{} {
 	for _, t := range tools {
 		tool := map[string]interface{}{"name": t.Name, "description": t.Description}
 		if len(t.Parameters) > 0 {
-			tool["input_schema"] = ir.CleanJsonSchemaForClaude(copyMap(t.Parameters))
+			// Use centralized schema cleaner for Claude to ensure parity with AntigravityExecutor
+			// This handles const->enum, type flattening, and unsupported keywords.
+			// Since util.CleanJSONSchemaForAntigravity adds placeholder schemas which Claude supports,
+			// it's a good fit here.
+			if jsonBytes, err := json.Marshal(ir.CopyMap(t.Parameters)); err == nil {
+				cleanedStr := util.CleanJSONSchemaForAntigravity(string(jsonBytes))
+				var cleanedMap map[string]interface{}
+				if err := json.Unmarshal([]byte(cleanedStr), &cleanedMap); err == nil {
+					tool["input_schema"] = cleanedMap
+				} else {
+					tool["input_schema"] = ir.CleanJsonSchemaEnhanced(ir.CopyMap(t.Parameters))
+				}
+			} else {
+				tool["input_schema"] = ir.CleanJsonSchemaEnhanced(ir.CopyMap(t.Parameters))
+			}
 		} else {
 			tool["input_schema"] = map[string]interface{}{
 				"type": "object", "properties": map[string]interface{}{}, "additionalProperties": false, "$schema": "http://json-schema.org/draft-07/schema#",
@@ -556,29 +570,4 @@ func errMsg(err error) string {
 		return err.Error()
 	}
 	return "Unknown error"
-}
-
-func copyMap(m map[string]interface{}) map[string]interface{} {
-	if m == nil {
-		return nil
-	}
-	result := make(map[string]interface{}, len(m))
-	for k, v := range m {
-		if nested, ok := v.(map[string]interface{}); ok {
-			result[k] = copyMap(nested)
-		} else if arr, ok := v.([]interface{}); ok {
-			newArr := make([]interface{}, len(arr))
-			for i, item := range arr {
-				if nestedMap, ok := item.(map[string]interface{}); ok {
-					newArr[i] = copyMap(nestedMap)
-				} else {
-					newArr[i] = item
-				}
-			}
-			result[k] = newArr
-		} else {
-			result[k] = v
-		}
-	}
-	return result
 }

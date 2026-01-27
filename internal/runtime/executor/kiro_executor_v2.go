@@ -499,6 +499,14 @@ func (e *KiroExecutorV2) executeWithRetry(rc *requestContext) (cliproxyexecutor.
 					lastErr = fmt.Errorf("token refresh failed: %w", refreshErr)
 					continue
 				}
+
+				// Try to persist the refreshed token
+				if saver, ok := refreshedAuth.Storage.(interface{ Save() error }); ok {
+					if err := saver.Save(); err != nil {
+						log.Warnf("kiro: failed to persist refreshed auth: %v", err)
+					}
+				}
+
 				rc.auth = refreshedAuth
 				rc.token = getMetaString(refreshedAuth.Metadata, "access_token", "accessToken")
 				continue
@@ -665,6 +673,14 @@ func (e *KiroExecutorV2) executeStreamWithRetry(rc *requestContext) (<-chan clip
 					lastErr = fmt.Errorf("token refresh failed: %w", refreshErr)
 					continue
 				}
+
+				// Try to persist the refreshed token
+				if saver, ok := refreshedAuth.Storage.(interface{ Save() error }); ok {
+					if err := saver.Save(); err != nil {
+						log.Warnf("kiro: failed to persist refreshed auth: %v", err)
+					}
+				}
+
 				rc.auth = refreshedAuth
 				rc.token = getMetaString(refreshedAuth.Metadata, "access_token", "accessToken")
 				continue

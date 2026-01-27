@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -135,7 +136,7 @@ func (e *AntigravityExecutorV2) Execute(ctx context.Context, auth *cliproxyauth.
 		if auth.Metadata["project_id"] == nil {
 			// Populate project_id via loadCodeAssist.
 			if errProject := ensureAntigravityProjectID(ctx, e.cfg, auth, token); errProject != nil {
-				log.Warnf("antigravity canonical executor: ensure project id failed: %v", errProject)
+				logWithRequestID(ctx).Warnf("antigravity canonical executor: ensure project id failed: %v", errProject)
 			}
 		}
 	}
@@ -157,17 +158,29 @@ func (e *AntigravityExecutorV2) Execute(ctx context.Context, auth *cliproxyauth.
 
 	// Apply YAML payload rules under protocol "antigravity".
 	// Historically, Antigravity rules target the inner request body.
-	body = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", body, opts.OriginalRequest)
+	requestedModel := payloadRequestedModel(opts, req.Model)
+	body = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", body, opts.OriginalRequest, requestedModel)
+
+	// Apply Claude-specific tweaks and cleanup for non-Claude models
+	if strings.Contains(baseModel, "claude") {
+		body, _ = sjson.SetBytes(body, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
+	} else {
+		body, _ = sjson.DeleteBytes(body, "request.generationConfig.maxOutputTokens")
+	}
 
 	_ = buildAntigravityEndpoint(auth, false, opts.Alt)
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 
+	attempts := antigravityRetryAttempts(auth, e.cfg)
+
 	var lastErr error
 	var lastStatus int
 	var lastBody []byte
 
-	for idx, baseURL := range baseURLs {
+attemptLoop:
+	for attempt := 0; attempt < attempts; attempt++ {
+		for idx, baseURL := range baseURLs {
 		requestURL := strings.TrimSuffix(baseURL, "/") + agv1internalGenerate
 		if opts.Alt != "" {
 			requestURL += "?$alt=" + url.QueryEscape(opts.Alt)
@@ -197,7 +210,7 @@ func (e *AntigravityExecutorV2) Execute(ctx context.Context, auth *cliproxyauth.
 
 		data, errRead := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("antigravity canonical executor: close response body error: %v", errClose)
+			logWithRequestID(ctx).Errorf("antigravity canonical executor: close response body error: %v", errClose)
 		}
 		recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 		appendAPIResponseChunk(ctx, e.cfg, data)
@@ -217,6 +230,20 @@ func (e *AntigravityExecutorV2) Execute(ctx context.Context, auth *cliproxyauth.
 			if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 				continue
 			}
+			if antigravityShouldRetryNoCapacity(httpResp.StatusCode, data) {
+				if idx+1 < len(baseURLs) {
+					logWithRequestID(ctx).Debugf("antigravity v2 executor: no capacity on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+					continue
+				}
+				if attempt+1 < attempts {
+					delay := antigravityNoCapacityRetryDelay(attempt)
+					log.Debugf("antigravity v2 executor: no capacity for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
+					if errWait := antigravityWait(ctx, delay); errWait != nil {
+						return resp, errWait
+					}
+					continue attemptLoop
+				}
+			}
 			break
 		}
 
@@ -228,6 +255,20 @@ func (e *AntigravityExecutorV2) Execute(ctx context.Context, auth *cliproxyauth.
 		resp = cliproxyexecutor.Response{Payload: translated}
 		reporter.ensurePublished(ctx)
 		return resp, nil
+		}
+
+		if lastStatus != 0 {
+			sErr := statusErr{code: lastStatus, msg: string(lastBody)}
+			if lastStatus == http.StatusTooManyRequests {
+				if retryAfter, parseErr := parseRetryDelay(lastBody); parseErr == nil && retryAfter != nil {
+					sErr.retryAfter = retryAfter
+				}
+			}
+			return resp, sErr
+		}
+		if lastErr != nil {
+			return resp, lastErr
+		}
 	}
 
 	if lastStatus != 0 {
@@ -268,7 +309,7 @@ func (e *AntigravityExecutorV2) ExecuteStream(ctx context.Context, auth *cliprox
 		if auth.Metadata["project_id"] == nil {
 			// Populate project_id via loadCodeAssist.
 			if errProject := ensureAntigravityProjectID(ctx, e.cfg, auth, token); errProject != nil {
-				log.Warnf("antigravity canonical executor: ensure project id failed: %v", errProject)
+				logWithRequestID(ctx).Warnf("antigravity canonical executor: ensure project id failed: %v", errProject)
 			}
 		}
 	}
@@ -284,17 +325,29 @@ func (e *AntigravityExecutorV2) ExecuteStream(ctx context.Context, auth *cliprox
 	if err != nil {
 		return nil, err
 	}
-	body = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", body, opts.OriginalRequest)
+	requestedModel := payloadRequestedModel(opts, req.Model)
+	body = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", body, opts.OriginalRequest, requestedModel)
+
+	// Apply Claude-specific tweaks and cleanup for non-Claude models
+	if strings.Contains(baseModel, "claude") {
+		body, _ = sjson.SetBytes(body, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
+	} else {
+		body, _ = sjson.DeleteBytes(body, "request.generationConfig.maxOutputTokens")
+	}
 
 	_ = buildAntigravityEndpoint(auth, true, opts.Alt)
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 
+	attempts := antigravityRetryAttempts(auth, e.cfg)
+
 	var lastErr error
 	var lastStatus int
 	var lastBody []byte
 
-	for idx, baseURL := range baseURLs {
+attemptLoop:
+	for attempt := 0; attempt < attempts; attempt++ {
+		for idx, baseURL := range baseURLs {
 		requestURL := strings.TrimSuffix(baseURL, "/") + agv1internalStream
 		if opts.Alt != "" {
 			requestURL += "?$alt=" + url.QueryEscape(opts.Alt)
@@ -332,6 +385,20 @@ func (e *AntigravityExecutorV2) ExecuteStream(ctx context.Context, auth *cliprox
 			lastBody = data
 			if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 				continue
+			}
+			if antigravityShouldRetryNoCapacity(httpResp.StatusCode, data) {
+				if idx+1 < len(baseURLs) {
+					logWithRequestID(ctx).Debugf("antigravity v2 executor: no capacity on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+					continue
+				}
+				if attempt+1 < attempts {
+					delay := antigravityNoCapacityRetryDelay(attempt)
+					log.Debugf("antigravity v2 executor: no capacity for model %s, retrying in %s (attempt %d/%d)", baseModel, delay, attempt+1, attempts)
+					if errWait := antigravityWait(ctx, delay); errWait != nil {
+						return nil, errWait
+					}
+					continue attemptLoop
+				}
 			}
 			break
 		}
@@ -415,6 +482,20 @@ func (e *AntigravityExecutorV2) ExecuteStream(ctx context.Context, auth *cliprox
 		}(httpResp)
 
 		return stream, nil
+		}
+
+		if lastStatus != 0 {
+			sErr := statusErr{code: lastStatus, msg: string(lastBody)}
+			if lastStatus == http.StatusTooManyRequests {
+				if retryAfter, parseErr := parseRetryDelay(lastBody); parseErr == nil && retryAfter != nil {
+					sErr.retryAfter = retryAfter
+				}
+			}
+			return nil, sErr
+		}
+		if lastErr != nil {
+			return nil, lastErr
+		}
 	}
 
 	if lastStatus != 0 {

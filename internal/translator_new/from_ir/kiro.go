@@ -112,8 +112,17 @@ func (p *KiroProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, error
 	tools := extractToolsStruct(req.Tools)
 	systemPrompt := extractSystemPrompt(req.Messages)
 
-	// Inject thinking mode - keeping simple for now to avoid validation issues
-	// systemPrompt = injectThinkingMode(req.Thinking, systemPrompt)
+	// Inject thinking mode configuration if present
+	// Kiro/Amazon Q supports official thinking mode via <thinking_mode> tag in system prompt
+	if req.Thinking != nil && (req.Thinking.IncludeThoughts || req.Thinking.Budget > 0) {
+		thinkingHint := `<thinking_mode>enabled</thinking_mode>
+<max_thinking_length>200000</max_thinking_length>`
+		if systemPrompt != "" {
+			systemPrompt = thinkingHint + "\n\n" + systemPrompt
+		} else {
+			systemPrompt = thinkingHint
+		}
+	}
 
 	history, currentMsg := processMessagesStruct(req.Messages, tools, req.Model, origin)
 
@@ -182,17 +191,39 @@ func extractOrigin(req *ir.UnifiedChatRequest) string {
 	return "AI_EDITOR"
 }
 
+func shortenToolNameIfNeeded(name string) string {
+	if len(name) > 64 {
+		return name[:64]
+	}
+	return name
+}
+
+func ensureKiroInputSchema(parameters map[string]interface{}) map[string]interface{} {
+	if parameters != nil {
+		return parameters
+	}
+	return map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}
+}
+
 func extractToolsStruct(irTools []ir.ToolDefinition) []ToolSpecification {
 	if len(irTools) == 0 {
 		return nil
 	}
 	tools := make([]ToolSpecification, len(irTools))
 	for i, t := range irTools {
+		// Use enhanced schema cleaning for better compatibility
+		// This handles $ref resolution, allOf merging, and removes unsupported keywords
+		cleanedSchema := ir.CleanJsonSchemaEnhanced(ir.CopyMap(t.Parameters))
+		finalSchema := ensureKiroInputSchema(cleanedSchema)
+		
 		tools[i] = ToolSpecification{
 			ToolSpecification: ToolSpecDetails{
-				Name:        t.Name,
+				Name:        shortenToolNameIfNeeded(t.Name),
 				Description: t.Description,
-				InputSchema: ToolInputSchema{Json: t.Parameters},
+				InputSchema: ToolInputSchema{Json: finalSchema},
 			},
 		}
 	}

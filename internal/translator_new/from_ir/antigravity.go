@@ -8,6 +8,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 )
 
 const antigravityIdentity = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.\n" +
@@ -73,8 +74,22 @@ func (p *AntigravityProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte
 							// Filter out redundant networking tools if configured (optional, skipping for now to keep canonical)
 							// Clean parameters schema
 							if params, ok := declMap["parameters"].(map[string]any); ok {
-								// Re-run schema cleaner (enhanced) to be safe
-								declMap["parameters"] = ir.CleanJsonSchemaEnhanced(params)
+								// Step 1: Enhanced cleaning ($ref resolution, allOf merge, etc.)
+								cleaned := ir.CleanJsonSchemaEnhanced(params)
+								// Step 2: Gemini-specific cleaning (removes nullable, title, placeholder fields)
+								// Marshal to JSON string for util.CleanJSONSchemaForGemini
+								if jsonBytes, err := json.Marshal(cleaned); err == nil {
+									cleanedStr := util.CleanJSONSchemaForGemini(string(jsonBytes))
+									// Unmarshal back to map
+									var finalSchema map[string]any
+									if err := json.Unmarshal([]byte(cleanedStr), &finalSchema); err == nil {
+										declMap["parameters"] = finalSchema
+									} else {
+										declMap["parameters"] = cleaned
+									}
+								} else {
+									declMap["parameters"] = cleaned
+								}
 							}
 							cleanedDecls = append(cleanedDecls, declMap)
 						}
