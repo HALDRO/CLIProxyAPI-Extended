@@ -62,15 +62,24 @@ func BuildToolResultsMap(messages []Message) map[string]*ToolResultPart {
 }
 
 // ValidateAndNormalizeJSON ensures a string is valid JSON, wrapping it if not.
+// If multiple JSON objects are concatenated, only the first valid one is returned.
 func ValidateAndNormalizeJSON(s string) string {
 	if s == "" {
 		return "{}"
 	}
-	if !json.Valid([]byte(s)) {
-		b, _ := json.Marshal(s)
-		return string(b)
+
+	// Try to parse using json.NewDecoder to extract the first valid JSON object
+	// This naturally handles concatenated JSON objects (e.g., "{...}{...}")
+	// and stops after the first complete value.
+	dec := json.NewDecoder(strings.NewReader(s))
+	var raw json.RawMessage
+	if err := dec.Decode(&raw); err == nil {
+		return string(raw)
 	}
-	return s
+
+	// Fallback: wrap the entire string as a JSON string value
+	b, _ := json.Marshal(s)
+	return string(b)
 }
 
 // ParseToolCallArgs parses tool call arguments, using hujson for relaxed parsing.

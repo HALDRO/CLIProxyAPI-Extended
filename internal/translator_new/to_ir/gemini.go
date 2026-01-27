@@ -59,6 +59,7 @@ func ParseGeminiResponseMeta(rawJSON []byte) ([]ir.Message, *ir.Usage, *ir.Respo
 				if args == "" {
 					args = "{}"
 				}
+				args = ir.ValidateAndNormalizeJSON(args)
 				msg.ToolCalls = append(msg.ToolCalls, ir.ToolCall{ID: ir.GenToolCallIDWithName(name), Name: name, Args: args, ThoughtSignature: ts})
 			}
 		} else if img := parseGeminiInlineImage(part); img != nil {
@@ -141,6 +142,7 @@ func ParseGeminiChunk(rawJSON []byte) ([]ir.UnifiedEvent, error) {
 					if args == "" {
 						args = "{}"
 					}
+					args = ir.ValidateAndNormalizeJSON(args)
 
 					var partialArgs string
 					if pa := fc.Get("partialArgs"); pa.Exists() {

@@ -28,10 +28,11 @@ type UnifiedStreamState struct {
 	HasContent          bool         // Track if any actual content was output
 
 	// Logic Handling
-	ToolCallIndex  int               // Current linear index for tool calls (0, 1, 2...)
-	FinishSent     bool              // Track if finish event was already sent
-	ToolCallIDMap  map[string]string // Maps item_id -> call_id (specific to OpenAI Responses API input)
-	OutputIndexMap map[int]int       // Maps source output_index -> target tool_index
+	ToolCallIndex     int               // Current linear index for tool calls (0, 1, 2...)
+	ToolCallIDToIndex map[string]int    // Maps tool call ID -> assigned index
+	FinishSent        bool              // Track if finish event was already sent
+	ToolCallIDMap     map[string]string // Maps item_id -> call_id (specific to OpenAI Responses API input)
+	OutputIndexMap    map[int]int       // Maps source output_index -> target tool_index
 }
 
 // EnsureInitialized initializes maps and substructures if they are nil.
@@ -41,6 +42,9 @@ func (s *UnifiedStreamState) EnsureInitialized() {
 	}
 	if s.ToolCallIDMap == nil {
 		s.ToolCallIDMap = make(map[string]string)
+	}
+	if s.ToolCallIDToIndex == nil {
+		s.ToolCallIDToIndex = make(map[string]int)
 	}
 	if s.OutputIndexMap == nil {
 		s.OutputIndexMap = make(map[int]int)
@@ -359,19 +363,34 @@ func convertUnifiedEventsToChunks(events []ir.UnifiedEvent, to sdktranslator.For
 			}
 
 			// 3. Handle Tool Call Indexing (Linearizing output indices)
-			//    Map arbitrary input ToolCallIndex to 0, 1, 2...
-			outputIdx := event.ToolCallIndex
-			effectiveIdx := outputIdx
+			//    Use tool call ID as primary key to prevent merging separate tool calls
+			effectiveIdx := event.ToolCallIndex
 
 			if event.Type == ir.EventTypeToolCall || event.Type == ir.EventTypeToolCallDelta {
-				if mappedIdx, exists := state.OutputIndexMap[outputIdx]; exists {
-					effectiveIdx = mappedIdx
-				} else if event.Type == ir.EventTypeToolCall {
-					// Assign new linear index
-					effectiveIdx = state.ToolCallIndex
-					state.OutputIndexMap[outputIdx] = effectiveIdx
-					state.ToolCallIndex++
+				if event.ToolCall != nil && event.ToolCall.ID != "" {
+					// Use tool call ID as the key for index mapping
+					if mappedIdx, exists := state.ToolCallIDToIndex[event.ToolCall.ID]; exists {
+						// This tool call ID has been seen before, reuse its index
+						effectiveIdx = mappedIdx
+					} else if event.Type == ir.EventTypeToolCall {
+						// New tool call - assign next available index
+						effectiveIdx = state.ToolCallIndex
+						state.ToolCallIDToIndex[event.ToolCall.ID] = effectiveIdx
+						state.ToolCallIndex++
+					}
+				} else {
+					// Fallback: use original index-based logic if no ID available
+					outputIdx := event.ToolCallIndex
+					if mappedIdx, exists := state.OutputIndexMap[outputIdx]; exists {
+						effectiveIdx = mappedIdx
+					} else if event.Type == ir.EventTypeToolCall {
+						effectiveIdx = state.ToolCallIndex
+						state.OutputIndexMap[outputIdx] = effectiveIdx
+						state.ToolCallIndex++
+					}
 				}
+				// Apply the effective index to the event
+				event.ToolCallIndex = effectiveIdx
 			}
 
 			// 4. Handle Finish Events
@@ -379,7 +398,9 @@ func convertUnifiedEventsToChunks(events []ir.UnifiedEvent, to sdktranslator.For
 				if state.FinishSent {
 					continue // Duplicate finish prevention
 				}
-				if !state.HasContent {
+				// Allow finish if we have content OR if there's an explicit finish reason
+				// (Gemini sometimes returns empty STOP after tool calls)
+				if !state.HasContent && event.FinishReason == "" {
 					continue // Empty STOP prevention
 				}
 				state.FinishSent = true
