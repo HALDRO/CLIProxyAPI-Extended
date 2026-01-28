@@ -1,63 +1,44 @@
 # CLIProxyAPI-Extended
 
-> Fork of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) with unified Canonical IR translation architecture and new providers (Kiro, GitHub Copilot, Cline, Ollama)
+> Fork of [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus) with advanced Canonical IR architecture, full Ollama compatibility, and Cline integration
 
 [![Original Repo](https://img.shields.io/badge/Original-router--for--me%2FCLIProxyAPI-blue)](https://github.com/router-for-me/CLIProxyAPI)
 [![Plus Version](https://img.shields.io/badge/Plus-router--for--me%2FCLIProxyAPIPlus-green)](https://github.com/router-for-me/CLIProxyAPIPlus)
 
 ## Why This Fork?
 
-This fork introduces **Canonical IR** — an alternative translation architecture that improves compatibility with AI coding clients (Cursor, Copilot Chat, etc.) and simplifies the codebase.
+This fork pioneered the **Canonical IR architecture** before the official Plus version. As of January 28, 2026, it synchronizes with [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus) while maintaining unique improvements:
 
-**Key improvements:**
-- Better client compatibility through unified request/response handling
-- Proper tool schema conversion (OpenAI `parameters` → Claude `input_schema`)
-- Simplified architecture: all formats go through a single intermediate representation
-- Easier to maintain and extend with new providers
+| Feature | Description |
+|---------|-------------|
+| **Full Ollama Compatibility** | Complete bidirectional protocol support (`/api/chat`, `/api/generate`) with streaming — use any provider through Ollama API |
+| **Cline Integration** | Free models support (MiniMax M2, Grok Code Fast 1) |
+| **Enhanced Stability** | Improved compatibility with Cursor, Copilot Chat, and other AI coding clients |
+| **Advanced Architecture** | Refined Canonical IR implementation with 54% codebase reduction (17,464 → 7,992 lines) |
 
-```
-Any Input  →  Unified IR  →  Any Output
-```
-
-Both translation architectures are available — switch via `use-canonical-translator` config option.
+**Canonical IR benefits:**
+- Hub-and-spoke model eliminates N×M translation paths
+- Type-safe `UnifiedChatRequest` with compile-time guarantees
+- Single `UnifiedEvent` type for SSE/NDJSON/binary protocols
+- Zero-allocation `gjson`-based parsers
+- 54% codebase reduction (17,464 → 7,992 lines)
 
 ---
 
 ## Quick Start
 
-All experimental features of this fork are **enabled by default**:
-
-- ✅ **Canonical IR Translator** — new translation architecture
-- ✅ **Provider Prefixes** — visual provider identification in model list
-
-To disable these features, add to your `config.yaml`:
+New features are **enabled by default**:
 
 ```yaml
-use-canonical-translator: false  # Revert to legacy translator
-show-provider-prefixes: false    # Hide provider prefixes in model list
+use-canonical-translator: true   # Canonical IR architecture (default)
+show-provider-prefixes: true     # Visual provider prefixes (default)
 ```
 
-With `use-canonical-translator: false`, the system runs on the legacy translator from the original project.
+**Provider prefixes:** Visual identification in model list (e.g., `[Gemini CLI] gemini-2.5-flash`). Purely cosmetic — models work with or without prefix.
 
----
+**Provider selection:** Without prefix (or with prefixes disabled), system uses **round-robin** for load balancing.
 
-## What's Added in This Fork
-
-| Component | Description |
-|-----------|-------------|
-| **Canonical IR Translator** | Hub-and-spoke architecture for format translation |
-| **Ollama API** | Full implementation of Ollama-compatible server |
-| **Kiro (Amazon Q)** | Provider with access to Claude via Amazon Q (multiple auth methods) |
-| **GitHub Copilot** | New provider with OAuth Device Flow authentication |
-| **Cline** | Provider with free models (MiniMax M2, Grok) |
-| **Model Registry** | Support for provider:modelID keys, visual prefixes |
-| **ThinkingSupport** | Metadata for reasoning-capable models |
-
----
-
-> **62% codebase reduction** — from 13,930 to 5,302 lines  
-> **86% Google providers unification** — from 5,651 to 780 lines  
-> **New providers:** Ollama, Kiro (Amazon Q), GitHub Copilot, Cline (free models)
+**Note:** Ollama API and Cline require `use-canonical-translator: true`
 
 ## Architecture
 
@@ -73,295 +54,134 @@ With `use-canonical-translator: false`, the system runs on the legacy translator
                                         └───── Cline
 ```
 
-**Result:** 15 files (5 parsers + 5 emitters + 5 IR core), minimal duplication.
-
-## Metrics
+**Result:** 21 files (7 parsers + 7 emitters + 6 IR core + 1 adapter), 7,992 lines
 
 | Metric                    | Legacy        | Canonical IR  | Δ         |
 |---------------------------|---------------|---------------|-----------|
-| Files                     | 84            | 15            | **−82%**  |
-| Lines of code             | 13,930        | 5,302         | **−62%**  |
-| Translation paths         | 27            | 10            | **−63%**  |
-| Google providers (lines)  | 5,651         | 780           | **−86%**  |
+| Files                     | 99            | 21            | **−79%**  |
+| Lines of code             | 17,464        | 7,992         | **−54%**  |
+| Translation paths         | N×M           | 2N (hub)      | **−48%**  |
 
-### Google Providers Breakdown
+---
 
-| Provider     | Legacy  | Canonical | Note                            |
-|--------------|--------:|----------:|---------------------------------|
-| Gemini       | 2,547   | 780       | Unified into 2 files:           |
-| Gemini CLI   | 1,520   | (shared)  | `to_ir/gemini.go` (220 lines)   |
-| Antigravity  | 1,584   | (shared)  | `from_ir/gemini.go` (560 lines) |
-| **Total**    | **5,651** | **780** | **−86%**                        |
+## Ollama Compatibility
+
+The proxy acts as a **full Ollama-compatible server** — clients can use any provider through Ollama API:
+
+```
+Ollama client (/api/chat, /api/generate)
+    ↓ parse directly to IR (no OpenAI conversion)
+Canonical IR
+    ↓ convert to provider format
+Provider (Gemini/Claude/OpenAI/Cline/etc.)
+    ↓ response through IR
+Ollama response (streaming/non-streaming)
+```
+
+**Recommended:** Run on port `11434` for maximum client compatibility.
+
+**Use case:** IDEs with Ollama support but without OpenAI API (e.g., some Copilot Chat configurations).
 
 ## Provider Support
 
-| Provider      | Parsing (to_ir)      | Generation (from_ir) |
-|---------------|:--------------------:|:--------------------:|
-| OpenAI        | ✅ Req/Resp/Stream   | ✅ Req/Resp/Stream   |
-| Claude        | ✅ Req/Resp/Stream   | ✅ Req/Resp/SSE      |
-| Gemini        | ✅ Resp/Stream       | ✅ Req/Resp/Stream   |
-| Gemini CLI    | ✅ (shared w/ Gemini)| ✅ GeminiCLIProvider |
-| Antigravity   | ✅ (shared w/ Gemini)| ✅ (via GeminiCLI)   |
-| Ollama        | ✅ Req/Resp/Stream   | ✅ Req/Resp/Stream   |
-| Kiro          | ✅ Resp/Stream       | ✅ Req               |
-| Copilot       | ✅ (via OpenAI)      | ✅ (via OpenAI)      |
-| Cline         | ✅ (via OpenAI)      | ✅ (via OpenAI)      |
+| Provider      | Input (to_ir)        | Output (from_ir)     | Status |
+|---------------|:--------------------:|:--------------------:|:------:|
+| OpenAI        | ✅ Req/Resp/Stream   | ✅ Req/Resp/Stream   | ✅ Tested |
+| Claude        | ✅ Req/Resp/Stream   | ✅ Req/Resp/SSE      | ✅ Tested |
+| Gemini        | ✅ Resp/Stream       | ✅ Req/Resp/Stream   | ✅ Tested |
+| Gemini CLI    | ✅ (shared)          | ✅ CLI format        | ✅ Tested |
+| Antigravity   | ✅ Req/Resp          | ✅ v1internal        | ✅ Tested |
+| **Ollama**    | ✅ Req/Resp/Stream   | ✅ Req/Resp/Stream   | ✅ Tested |
+| **Cline**     | ✅ (via OpenAI)      | ✅ (via OpenAI)      | ✅ Tested |
+| Kiro          | ✅ Resp/Stream       | ✅ Req               | ✅ Tested |
+| Codex         | ✅ Req/Resp          | ✅ Responses API     | ✅ Tested |
+| Copilot       | ✅ (via OpenAI)      | ✅ (via OpenAI)      | ✅ Tested |
+| Qwen          | ❌                   | ❌                   | ⚠️ Migration needed |
+| iFlow         | ❌                   | ❌                   | ⚠️ Migration needed |
 
-**GitHub Copilot** — provider with access to GPT and Claude models via GitHub Copilot subscription:
-- GPT-4o, GPT-4.1, Claude Sonnet 4, o3-mini, o4-mini and other models
-- Uses OAuth Device Flow for authentication
-- Automatic token caching and refresh
+**Key Features:**
+- Reasoning/Thinking blocks with `reasoning_tokens` tracking
+- Tool calls with unified ID generation
+- Multimodal support (images, PDF, inline data)
+- Streaming: SSE (OpenAI/Claude), NDJSON (Gemini/Ollama)
+- Responses API (`/v1/responses`)
 
-**Cline** — provider with free models (MiniMax M2, Grok Code Fast 1), uses OpenAI-compatible format.
+**Known Issues:**
+- Antigravity GPT-OSS: thinking mode disabled (infinite planning loops)
+- CLI agents (Aider, etc.): not tested
 
-**Kiro (Amazon Q)** — provider with access to Claude models via Amazon Q:
-- Claude Sonnet 4.5, Claude 4 Opus, Claude 3.7 Sonnet, Claude 3.5 Sonnet/Haiku
-- Uses binary AWS Event Stream protocol
-- Multiple authentication methods (see below)
-
-### Ollama as Output Format
-
-The proxy acts as an **Ollama-compatible server** with full API implementation. Incoming Ollama requests are parsed directly into IR format (no intermediate OpenAI conversion on input). The request is then converted to the target provider's format for execution, and the response is converted back through IR to Ollama format.
-
-**Server is recommended to run on standard port 11434** to avoid client compatibility issues.
-
-```
-Ollama client (/api/chat)
-    ↓ parse directly to IR
-Canonical IR
-    ↓ convert to provider format
-Provider (Gemini/Claude/OpenAI/etc.)
-    ↓ response
-Canonical IR
-    ↓ convert to Ollama format
-Ollama response
-```
-
-**Use case:** IDEs with Ollama support but without OpenAI-compatible API (e.g., Copilot Chat).
-
-## Structure
-
-```
-translator_new/
-├── ir/           # Core (5 files, 1,239 lines)
-│   ├── types.go            # UnifiedChatRequest, UnifiedEvent, Message
-│   ├── util.go             # ID generation, finish reason mapping
-│   ├── message_builder.go  # Message parsing
-│   ├── response_builder.go # Response building
-│   └── claude_builder.go   # Claude SSE utilities
-│
-├── to_ir/        # Parsers (5 files, 1,530 lines)
-│   ├── openai.go   # Chat Completions + Responses API (+ Cline)
-│   ├── claude.go   # Messages API
-│   ├── gemini.go   # AI Studio + CLI + Antigravity
-│   ├── ollama.go   # /api/chat + /api/generate
-│   └── kiro.go     # Amazon Q
-│
-└── from_ir/      # Emitters (5 files, 2,533 lines)
-    ├── openai.go   # Chat Completions + Responses API (+ Cline)
-    ├── claude.go   # Messages API + SSE streaming
-    ├── gemini.go   # GeminiProvider + GeminiCLIProvider
-    ├── ollama.go   # /api/chat + /api/generate
-    └── kiro.go     # KiroProvider
-```
-
-## Key Features
-
-- **Reasoning/Thinking** — unified handling of thinking blocks with `reasoning_tokens` tracking
-- **Tool Calls** — unified ID generation and argument parsing
-- **Multimodal** — images, PDF, inline data
-- **Streaming** — SSE (OpenAI/Claude) and NDJSON (Gemini/Ollama)
-- **Responses API** — full support for `/v1/responses`
-- **ThinkingSupport** — model metadata for reasoning-capable models
-
-
-## Limitations and Status
-
-### Testing
-- ✅ **Tested:** Cursor, Copilot Chat and similar UI clients
-- ⚠️ **Not tested:** CLI agents (Codex CLI, Aider, etc.)
-- ⚠️ **Claude (Anthropic):** implemented without API access, requires testing
-
-### Antigravity Provider — UI Client Testing
-| Model | Status | Note |
-|-------|:------:|------|
-| Claude Sonnet 4.5 | ✅ | Fully tested in Cursor/Copilot Chat |
-| Gemini models | ✅ | Fully tested in Cursor/Copilot Chat |
-| GPT-OSS | ⚠️ | **Thinking disabled** — model gets stuck in planning loops |
-
-> **TODO:** Fix GPT-OSS thinking mode. The model enters infinite planning loops when thinking is enabled, repeatedly generating the same plan without executing actions. Temporarily disabled via `delete(genConfig, "thinkingConfig")` in `antigravity_executor.go`.
-
-### Executors with Canonical IR Support
-| Executor           | Status | Note |
-|--------------------|:------:|------|
-| gemini             | ✅     | AI Studio, tested |
-| gemini_vertex      | ✅     | Vertex AI, tested |
-| gemini_cli         | ✅     | Google, tested |
-| antigravity        | ✅     | Google, tested (Claude Sonnet, Gemini) |
-| aistudio           | ✅     | AI Studio, tested |
-| openai_compat      | ✅     | OpenAI-compatible, tested |
-| cline              | ✅     | Free models, tested |
-| kiro               | ✅     | Amazon Q, tested (multiple auth methods) |
-| github_copilot     | ✅     | GitHub Copilot, tested |
-| claude             | ✅     | Anthropic, tested (Claude Code) |
-| codex              | ✅     | OpenAI Responses, tested |
-| **qwen**           | ❌     | Requires migration |
-| **iflow**          | ❌     | Requires migration |
-
-## Authentication for New Providers
-
-> **Note:** Unlike Gemini/Claude (full OAuth2 flow with auto browser opening), Cline and Kiro use a **semi-manual method** — tokens are extracted from IDE manually.
+## Authentication
 
 ### Cline
-- Uses long-lived refresh token for authentication
-- Refresh token is automatically exchanged for short-lived JWT access token (~10 minutes)
-- JWT token is used with `workos:` prefix for API requests
-- **Important:** Obtaining the refresh token requires modification of the Cline extension source code
+- Long-lived refresh token → short-lived JWT (~10 minutes)
+- JWT used with `workos:` prefix for API requests
+- **Note:** Obtaining refresh token requires Cline extension source modification
 
-### GitHub Copilot
-- Uses **OAuth Device Flow** for secure authentication
-- Run `cliproxy login github-copilot` to authenticate
-- Opens browser with device code, user confirms on GitHub
-- Tokens are automatically cached and refreshed
-- Access to GPT-4o, GPT-4.1, Claude Sonnet 4, o3-mini, o4-mini and other Copilot models
 
-### Kiro (Amazon Q)
-- Tokens are automatically loaded from JSON file in auth directory (watcher) if you're logged into Kiro IDE, or can be configured manually
-- Supports multiple authentication methods:
-  - **AWS Builder ID** — via AWS SSO OIDC device code flow (`cliproxy login kiro --method builderid`)
-  - **Social auth** (Google/GitHub) — via Kiro AuthService with custom `kiro://` protocol handler
-  - **Manual token** — load tokens from Kiro IDE cache automatically
-- Tokens are automatically refreshed via the corresponding endpoint
-- Run `cliproxy login kiro` to see available authentication options
 
-## Compatibility and Migration
-
-**New features are enabled by default** — to revert to legacy behavior, disable via config:
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `use-canonical-translator` | Enables new IR translation architecture | `true` |
-| `show-provider-prefixes` | Visual provider prefixes in model list | `true` |
-
-With `use-canonical-translator: false` the system runs on legacy translator without changes.  
-New providers (Kiro, Cline, Ollama API) only work with the flag enabled.
-
-**About provider prefixes:** The `show-provider-prefixes` flag adds visual prefixes (e.g., `[Gemini CLI] gemini-2.5-flash`) to distinguish identical models from different providers. Prefixes are purely cosmetic — models can be called with or without the prefix.
-
-**Provider selection:** When calling a model without a prefix (or with prefixes disabled), the system uses **round-robin** — providers are selected in turn among available ones. This provides load balancing between multiple accounts/providers with the same model.
+### Other Providers
+Full OAuth2 flows with auto browser opening (Gemini, Claude, Codex, GitHub Copilot, etc.) — see [original documentation](https://help.router-for.me/)
 
 ---
-
-## Original CLIProxyAPI Features
-
-> For complete documentation of the original project, see [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
-
-- OpenAI/Gemini/Claude compatible API endpoints for CLI models
-- OpenAI Codex support (GPT models) via OAuth login
-- Claude Code support via OAuth login
-- Qwen Code support via OAuth login
-- iFlow support via OAuth login
-- GitHub Copilot support via OAuth Device Flow login
-- Streaming and non-streaming responses
-- Function calling/tools support
-- Multimodal input support (text and images)
-- Multiple accounts with round-robin load balancing
-- Simple CLI authentication flows
-- Reusable Go SDK for embedding the proxy
 
 ## Getting Started
 
-CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
+- **Guides:** [https://help.router-for.me/](https://help.router-for.me/)
+- **Management API:** [MANAGEMENT_API.md](https://help.router-for.me/management/api)
+- **Amp CLI Integration:** [Complete Guide](https://help.router-for.me/agent-client/amp-cli.html)
+- **SDK Documentation:**
+  - [Usage](docs/sdk-usage.md) | [Advanced](docs/sdk-advanced.md) | [Access](docs/sdk-access.md) | [Watcher](docs/sdk-watcher.md)
+  - [Custom Provider Example](examples/custom-provider)
 
-## Management API
+---
 
-see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
+## Original Features
 
-## Amp CLI Support
+From [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI):
 
-CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and Amp IDE extensions, enabling you to use your Google/ChatGPT/Claude OAuth subscriptions with Amp's coding tools:
+- OpenAI/Gemini/Claude compatible endpoints
+- OAuth login (Codex, Claude Code, Qwen, iFlow, GitHub Copilot)
+- Streaming/non-streaming, function calling, multimodal
+- Multiple accounts with round-robin
+- Reusable Go SDK
 
-- Provider route aliases for Amp's API patterns (`/api/provider/{provider}/v1...`)
-- Management proxy for OAuth authentication and account features
-- Smart model fallback with automatic routing
-- **Model mapping** to route unavailable models to alternatives (e.g., `claude-opus-4.5` → `claude-sonnet-4`)
-- Security-first design with localhost-only management endpoints
+---
 
-**→ [Complete Amp CLI Integration Guide](https://help.router-for.me/agent-client/amp-cli.html)**
+## 📋 Contributing
 
-## SDK Docs
+**Experimental fork** — sharing for community use.
 
-- Usage: [docs/sdk-usage.md](docs/sdk-usage.md)
-- Advanced (executors & translators): [docs/sdk-advanced.md](docs/sdk-advanced.md)
-- Access: [docs/sdk-access.md](docs/sdk-access.md)
-- Watcher: [docs/sdk-watcher.md](docs/sdk-watcher.md)
-- Custom Provider Example: `examples/custom-provider`
+- **Cherry-pick freely** — take features/fixes useful for your projects
+- **Limited maintenance** — time constraints on extensive reviews
+- **Clear solutions only** — provide specific fixes or clear reproduction steps
 
-## 📋 Contributing Notice
+Simple bug fixes with ready-to-merge code welcome. For larger changes, consider forking for full control.
 
-**This is an experimental fork.** I'm sharing this work for the community to use and build upon.
+---
 
-- **Cherry-pick what you need** — feel free to take individual features or fixes that are useful for your projects
-- **Limited maintenance** — I have limited time to review extensive change requests
-- **Tested but experimental** — the code works in my testing environment, but your mileage may vary
-- **Clear solutions only** — if you report an issue, please provide a specific fix or clear reproduction steps; I don't have time to investigate vague problem descriptions
+## Ecosystem
 
-Contributions are welcome! Simple bug fixes with ready-to-merge code will likely be accepted. For larger changes or feature requests, consider forking — this gives you full control over the direction of your modifications.
+Projects based on CLIProxyAPI:
 
-## Who is with us?
+- **[vibeproxy](https://github.com/automazeio/vibeproxy)** — macOS menu bar app for Claude Code & ChatGPT with AI coding tools
+- **[Subtitle Translator](https://github.com/VjayC/SRT-Subtitle-Translator-Validator)** — browser-based SRT translator via Gemini
+- **[CCS (Claude Code Switch)](https://github.com/kaitranntt/ccs)** — CLI for instant account/model switching
+- **[ProxyPal](https://github.com/heyhuynhgiabuu/proxypal)** — macOS GUI for CLIProxyAPI management
+- **[Quotio](https://github.com/nguyenphutrong/quotio)** — macOS menu bar with unified quota tracking & auto-failover
+- **[CodMate](https://github.com/loocor/CodMate)** — macOS SwiftUI app for CLI AI session management
+- **[ProxyPilot](https://github.com/Finesssee/ProxyPilot)** — Windows-native fork with TUI & system tray
+- **[Claude Proxy VSCode](https://github.com/uzhao/claude-proxy-vscode)** — VSCode extension for Claude Code model switching
 
-Those projects are based on CLIProxyAPI:
+**Ports & Inspired Projects:**
 
-### [vibeproxy](https://github.com/automazeio/vibeproxy)
+- **[9Router](https://github.com/decolua/9router)** — Next.js implementation with web dashboard & auto-fallback
 
-Native macOS menu bar app to use your Claude Code & ChatGPT subscriptions with AI coding tools - no API keys needed
+> Open a PR to add your project to this list.
 
-### [Subtitle Translator](https://github.com/VjayC/SRT-Subtitle-Translator-Validator)
-
-Browser-based tool to translate SRT subtitles using your Gemini subscription via CLIProxyAPI with automatic validation/error correction - no API keys needed
-
-### [CCS (Claude Code Switch)](https://github.com/kaitranntt/ccs)
-
-CLI wrapper for instant switching between multiple Claude accounts and alternative models (Gemini, Codex, Antigravity) via CLIProxyAPI OAuth - no API keys needed
-
-### [ProxyPal](https://github.com/heyhuynhgiabuu/proxypal)
-
-Native macOS GUI for managing CLIProxyAPI: configure providers, model mappings, and endpoints via OAuth - no API keys needed.
-
-### [Quotio](https://github.com/nguyenphutrong/quotio)
-
-Native macOS menu bar app that unifies Claude, Gemini, OpenAI, Qwen, and Antigravity subscriptions with real-time quota tracking and smart auto-failover for AI coding tools like Claude Code, OpenCode, and Droid - no API keys needed.
-
-### [CodMate](https://github.com/loocor/CodMate)
-
-Native macOS SwiftUI app for managing CLI AI sessions (Codex, Claude Code, Gemini CLI) with unified provider management, Git review, project organization, global search, and terminal integration. Integrates CLIProxyAPI to provide OAuth authentication for Codex, Claude, Gemini, Antigravity, and Qwen Code, with built-in and third-party provider rerouting through a single proxy endpoint - no API keys needed for OAuth providers.
-
-### [ProxyPilot](https://github.com/Finesssee/ProxyPilot)
-
-Windows-native CLIProxyAPI fork with TUI, system tray, and multi-provider OAuth for AI coding tools - no API keys needed.
-
-### [Claude Proxy VSCode](https://github.com/uzhao/claude-proxy-vscode)
-
-VSCode extension for quick switching between Claude Code models, featuring integrated CLIProxyAPI as its backend with automatic background lifecycle management.
-
-> [!NOTE]  
-> If you developed a project based on CLIProxyAPI, please open a PR to add it to this list.
-
-## More choices
-
-Those projects are ports of CLIProxyAPI or inspired by it:
-
-### [9Router](https://github.com/decolua/9router)
-
-A Next.js implementation inspired by CLIProxyAPI, easy to install and use, built from scratch with format translation (OpenAI/Claude/Gemini/Ollama), combo system with auto-fallback, multi-account management with exponential backoff, a Next.js web dashboard, and support for CLI tools (Cursor, Claude Code, Cline, RooCode) - no API keys needed.
-
-> [!NOTE]  
-> If you have developed a port of CLIProxyAPI or a project inspired by it, please open a PR to add it to this list.
+---
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
+MIT License - see [LICENSE](LICENSE) file.
 
 **Original project:** [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
