@@ -169,12 +169,16 @@ func ParseGeminiChunk(rawJSON []byte) ([]ir.UnifiedEvent, error) {
 		// Check for finish reason
 		if fr := candidate.Get("finishReason"); fr.Exists() {
 			frStr := fr.String()
-			finishReason = ir.MapGeminiFinishReason(frStr)
-
-			// Handle MALFORMED_FUNCTION_CALL - Gemini sometimes returns malformed tool calls
-			// Skip these for now as they require special parsing
-			if frStr == "MALFORMED_FUNCTION_CALL" {
-				// Skip malformed function calls - no event emitted
+			
+			// Skip intermediate/recoverable finish reasons that should NOT end the stream.
+			// These are transient states where the model may self-correct or provider may continue.
+			// UNEXPECTED_TOOL_CALL: Gemini sends after thoughts but continues streaming
+			// MALFORMED_FUNCTION_CALL: Indicates tool call error - skipping allows model to recover
+			//                          (similar to Rust implementation where stream continues on errors)
+			if frStr == "UNEXPECTED_TOOL_CALL" || frStr == "MALFORMED_FUNCTION_CALL" {
+				// Skip - do not emit Finish event, stream may continue with recovery
+			} else {
+				finishReason = ir.MapGeminiFinishReason(frStr)
 			}
 		}
 	}

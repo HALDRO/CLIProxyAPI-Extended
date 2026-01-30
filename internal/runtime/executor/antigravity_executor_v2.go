@@ -161,6 +161,12 @@ func (e *AntigravityExecutorV2) Execute(ctx context.Context, auth *cliproxyauth.
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", body, opts.OriginalRequest, requestedModel)
 
+	// Apply thinking configuration (handles budget/level normalization and model capabilities)
+	body, err = thinking.ApplyThinking(body, req.Model, opts.SourceFormat.String(), "antigravity", e.Identifier())
+	if err != nil {
+		return resp, err
+	}
+
 	// Apply Claude-specific tweaks and cleanup for non-Claude models
 	if strings.Contains(baseModel, "claude") {
 		body, _ = sjson.SetBytes(body, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
@@ -327,6 +333,12 @@ func (e *AntigravityExecutorV2) ExecuteStream(ctx context.Context, auth *cliprox
 	}
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", body, opts.OriginalRequest, requestedModel)
+
+	// Apply thinking configuration (handles budget/level normalization and model capabilities)
+	body, err = thinking.ApplyThinking(body, req.Model, opts.SourceFormat.String(), "antigravity", e.Identifier())
+	if err != nil {
+		return nil, err
+	}
 
 	// Apply Claude-specific tweaks and cleanup for non-Claude models
 	if strings.Contains(baseModel, "claude") {

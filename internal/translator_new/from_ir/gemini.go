@@ -117,15 +117,23 @@ func (p *GeminiProvider) applyThinkingConfig(genConfig map[string]interface{}, r
 		return
 	}
 
-	// Simple thinking config
-	if req.Thinking.Budget > 0 {
-		genConfig["thinkingConfig"] = map[string]interface{}{
-			"thinkingBudget":   req.Thinking.Budget,
-			"include_thoughts": true,
-		}
-	} else {
-		genConfig["thinkingConfig"] = map[string]interface{}{"includeThoughts": true}
+	// Build thinking config
+	// IMPORTANT: When IncludeThoughts is true but Budget is 0, we must set thinkingBudget=-1 (auto)
+	// Otherwise Gemini API enables thought display but doesn't allocate thinking budget,
+	// causing the model to output thoughts and immediately stop with UNEXPECTED_TOOL_CALL.
+	thinkingConfig := map[string]interface{}{
+		"includeThoughts": true,
 	}
+
+	if req.Thinking.Budget > 0 {
+		// Explicit budget specified
+		thinkingConfig["thinkingBudget"] = req.Thinking.Budget
+	} else if req.Thinking.Budget == -1 || req.Thinking.IncludeThoughts {
+		// Auto mode (-1) or IncludeThoughts without budget: use auto budget
+		thinkingConfig["thinkingBudget"] = -1
+	}
+
+	genConfig["thinkingConfig"] = thinkingConfig
 }
 
 func (p *GeminiProvider) applyFunctionCallingConfig(root map[string]interface{}, fc *ir.FunctionCallingConfig) {
@@ -467,20 +475,12 @@ func (p *GeminiProvider) applyTools(root map[string]interface{}, req *ir.Unified
 				// Use enhanced schema cleaning with $ref resolution, allOf merge, anyOf→enum
 				// Step 1: Enhanced cleaning ($ref resolution, allOf merge, etc.)
 				cleaned := ir.CleanJsonSchemaEnhanced(ir.CopyMap(t.Parameters))
-				
-				// Step 2: Gemini-specific cleaning (removes nullable, title, placeholder fields)
-				// This ensures full parity with Antigravity logic.
-				if jsonBytes, err := json.Marshal(cleaned); err == nil {
-					cleanedStr := util.CleanJSONSchemaForGemini(string(jsonBytes))
-					var finalSchema map[string]interface{}
-					if err := json.Unmarshal([]byte(cleanedStr), &finalSchema); err == nil {
-						funcDecl["parameters"] = finalSchema
-					} else {
-						funcDecl["parameters"] = cleaned
-					}
-				} else {
-					funcDecl["parameters"] = cleaned
-				}
+
+				// Use cleaned schema directly.
+				// ir.CleanJsonSchemaEnhanced handles all Gemini compatibility requirements (rust parity).
+				// We skip the legacy util.CleanJSONSchemaForGemini step to avoid conflicting transforms
+				// (e.g. placeholder fields that are added by enhanced but removed by legacy).
+				funcDecl["parameters"] = cleaned
 			}
 			funcs = append(funcs, funcDecl)
 		}

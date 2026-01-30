@@ -587,7 +587,12 @@ func MapGeminiFinishReason(geminiReason string) FinishReason {
 	case "SAFETY", "RECITATION":
 		return FinishReasonContentFilter
 	case "MALFORMED_FUNCTION_CALL":
-		return FinishReasonToolCalls
+		// Recoverable error - should be skipped in stream, not treated as finish
+		return FinishReasonUnknown
+	case "UNEXPECTED_TOOL_CALL":
+		// This is an intermediate state, not a final finish reason
+		// Should be filtered out before calling this function
+		return FinishReasonUnknown
 	default:
 		return FinishReasonUnknown
 	}
