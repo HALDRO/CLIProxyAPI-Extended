@@ -35,6 +35,7 @@ GEMINI.md
 log_analyzer.go
 
 # Tooling metadata
+.scripts/*
 .vscode/*
 .cursor/*
 .codex/*
