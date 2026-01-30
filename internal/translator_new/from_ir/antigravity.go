@@ -127,12 +127,19 @@ func (p *AntigravityProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte
 
 	// [FIX] Ensure we remove maxOutputTokens if it exceeds 8192 for non-Claude models to prevent 400 errors
 	// or unexpected behavior. Canonical translator might have set it.
-	// Actually, let's just rely on upstream defaults unless explicitly set low.
-	// We can inspect inner["generationConfig"] and remove maxOutputTokens if it looks like a default.
+	// Exception: Thinking models require higher limits.
 	if genConfig, ok := inner.(map[string]any)["generationConfig"].(map[string]any); ok {
-		if maxTok, ok := genConfig["maxOutputTokens"].(float64); ok && maxTok > 8192 && !strings.Contains(req.Model, "claude") {
-			// Remove potentially unsafe large token limit for Gemini models
-			delete(genConfig, "maxOutputTokens")
+		if maxTok, ok := genConfig["maxOutputTokens"].(float64); ok {
+			limit := 8192.0
+			isThinking := false
+			if tc, ok := inner.(map[string]any)["generationConfig"].(map[string]any)["thinkingConfig"]; ok && tc != nil {
+				isThinking = true
+				limit = 65536.0
+			}
+			if maxTok > limit && !strings.Contains(req.Model, "claude") && !isThinking {
+				// Remove potentially unsafe large token limit for Gemini models
+				delete(genConfig, "maxOutputTokens")
+			}
 		}
 	}
 

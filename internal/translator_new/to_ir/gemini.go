@@ -169,7 +169,7 @@ func ParseGeminiChunk(rawJSON []byte) ([]ir.UnifiedEvent, error) {
 		// Check for finish reason
 		if fr := candidate.Get("finishReason"); fr.Exists() {
 			frStr := fr.String()
-			
+
 			// Skip intermediate/recoverable finish reasons that should NOT end the stream.
 			// These are transient states where the model may self-correct or provider may continue.
 			// UNEXPECTED_TOOL_CALL: Gemini sends after thoughts but continues streaming
@@ -218,7 +218,12 @@ func parseGeminiMeta(parsed gjson.Result) *ir.ResponseMeta {
 func parseGeminiUsage(parsed gjson.Result) *ir.Usage {
 	u := parsed.Get("usageMetadata")
 	if !u.Exists() {
-		return nil
+		// Some executors/middleware rename usageMetadata -> cpaUsageMetadata
+		// on non-terminal chunks to hide usage from clients while preserving it.
+		u = parsed.Get("cpaUsageMetadata")
+		if !u.Exists() {
+			return nil
+		}
 	}
 
 	promptTokens := int(u.Get("promptTokenCount").Int())

@@ -32,7 +32,7 @@ func CleanJsonSchema(schema map[string]interface{}) map[string]interface{} {
 		"if", "then", "else", "not", "contentEncoding", "contentMediaType",
 		"deprecated", "readOnly", "writeOnly", "examples", "$comment",
 		"$vocabulary", "$anchor", "$dynamicRef", "$dynamicAnchor",
-		"propertyNames",
+		"propertyNames", "external_web_access",
 	}
 	for _, kw := range unsupportedKeywords {
 		delete(schema, kw)
@@ -368,12 +368,8 @@ func cleanSchemaEnhancedRecursive(schema map[string]any) bool {
 
 		// 6. Handle empty Object
 		if t, ok := schema["type"].(string); ok && t == "object" {
-			props, _ := schema["properties"].(map[string]any)
-			if len(props) == 0 {
-				schema["properties"] = map[string]any{
-					"reason": map[string]any{"type": "string", "description": "Reason for calling this tool"},
-				}
-				schema["required"] = []any{"reason"}
+			if _, ok := schema["properties"]; !ok {
+				schema["properties"] = map[string]any{}
 			}
 		}
 
@@ -449,6 +445,10 @@ func cleanSchemaEnhancedRecursive(schema map[string]any) bool {
 				}
 			}
 			schema["enum"] = newEnum
+
+			// ENAMFIX (upstream parity): Antigravity/Gemini requires enums to be STRING type.
+			// Force type=string when enum is present.
+			schema["type"] = "string"
 		}
 	}
 

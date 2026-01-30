@@ -60,9 +60,23 @@ func (p *GeminiProvider) applyGenerationConfig(root map[string]interface{}, req 
 	if req.MaxTokens != nil {
 		// [FIX] Ensure we remove maxOutputTokens if it exceeds 8192 to prevent 400 errors
 		// This matches Antigravity behavior for stability.
-		if *req.MaxTokens <= 8192 {
+		// Exception: Thinking models require higher limits (budget + 8192)
+		isThinking := req.Thinking != nil && (req.Thinking.Budget > 0 || req.Thinking.IncludeThoughts)
+		limit := 8192
+		if isThinking {
+			limit = 65536 // Allow higher limit for thinking
+		}
+		if *req.MaxTokens <= limit {
 			genConfig["maxOutputTokens"] = *req.MaxTokens
 		}
+	} else if req.Thinking != nil && (req.Thinking.Budget > 0 || req.Thinking.IncludeThoughts) {
+		// [NEW] Default maxOutputTokens for thinking models if not specified
+		// budget (default 32000) + 8192 = 40192
+		budget := 32000
+		if req.Thinking.Budget > 0 {
+			budget = req.Thinking.Budget
+		}
+		genConfig["maxOutputTokens"] = budget + 8192
 	}
 
 	// Check if thinking mode is enabled (plan mode)
@@ -129,8 +143,8 @@ func (p *GeminiProvider) applyThinkingConfig(genConfig map[string]interface{}, r
 		// Explicit budget specified
 		thinkingConfig["thinkingBudget"] = req.Thinking.Budget
 	} else if req.Thinking.Budget == -1 || req.Thinking.IncludeThoughts {
-		// Auto mode (-1) or IncludeThoughts without budget: use auto budget
-		thinkingConfig["thinkingBudget"] = -1
+		// Auto mode (-1) or IncludeThoughts without budget: use default budget 32000
+		thinkingConfig["thinkingBudget"] = 32000
 	}
 
 	genConfig["thinkingConfig"] = thinkingConfig
