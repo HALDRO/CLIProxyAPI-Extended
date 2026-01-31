@@ -39,7 +39,37 @@ func CleanJsonSchema(schema map[string]interface{}) map[string]interface{} {
 	}
 
 	cleanNestedSchemas(schema)
+	
+	// Remove x-* extension fields (e.g., x-google-enum-descriptions) that are not supported by Gemini API
+	removeExtensionFields(schema)
+	
 	return schema
+}
+
+// removeExtensionFields removes all x-* extension fields from the JSON schema.
+func removeExtensionFields(schema map[string]interface{}) {
+	if schema == nil {
+		return
+	}
+	
+	for k, v := range schema {
+		if strings.HasPrefix(k, "x-") {
+			delete(schema, k)
+			continue
+		}
+		
+		// Recursively clean children
+		switch val := v.(type) {
+		case map[string]interface{}:
+			removeExtensionFields(val)
+		case []interface{}:
+			for _, item := range val {
+				if itemMap, ok := item.(map[string]interface{}); ok {
+					removeExtensionFields(itemMap)
+				}
+			}
+		}
+	}
 }
 
 func cleanNestedSchemas(schema map[string]interface{}) {
@@ -450,6 +480,9 @@ func cleanSchemaEnhancedRecursive(schema map[string]any) bool {
 			// Force type=string when enum is present.
 			schema["type"] = "string"
 		}
+		
+		// 10. Remove x-* extension fields
+		removeExtensionFields(schema)
 	}
 
 	return isEffectivelyNullable

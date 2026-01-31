@@ -292,7 +292,7 @@ func ToClaudeSSE(event ir.UnifiedEvent, model, messageID string, state *ClaudeSt
 		if state != nil {
 			state.FinishSent = true
 		}
-		result.WriteString(emitFinish(event.Usage, state))
+		result.WriteString(emitFinish(event.Usage, event.FinishReason, state))
 	case ir.EventTypeError:
 		result.WriteString(formatSSE(ir.ClaudeSSEError, map[string]interface{}{
 			"type": ir.ClaudeSSEError, "error": map[string]interface{}{"type": "api_error", "message": errMsg(event.Error)},
@@ -546,7 +546,7 @@ func emitToolCallDelta(tc *ir.ToolCall, state *ClaudeStreamState) string {
 	return result.String()
 }
 
-func emitFinish(usage *ir.Usage, state *ClaudeStreamState) string {
+func emitFinish(usage *ir.Usage, finishReason ir.FinishReason, state *ClaudeStreamState) string {
 	if state != nil && !state.HasContent {
 		return ""
 	}
@@ -555,7 +555,10 @@ func emitFinish(usage *ir.Usage, state *ClaudeStreamState) string {
 	stopReason := ir.ClaudeStopEndTurn
 	if state != nil && state.HasToolCalls {
 		stopReason = ir.ClaudeStopToolUse
+	} else if finishReason == ir.FinishReasonLength {
+		stopReason = ir.ClaudeStopMaxTokens
 	}
+	
 	delta := map[string]interface{}{"type": ir.ClaudeSSEMessageDelta, "delta": map[string]interface{}{"stop_reason": stopReason}}
 	if usage != nil {
 		delta["usage"] = map[string]interface{}{"input_tokens": usage.PromptTokens, "output_tokens": usage.CompletionTokens}

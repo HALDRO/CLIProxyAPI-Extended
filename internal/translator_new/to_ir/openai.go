@@ -79,6 +79,7 @@ func ParseOpenAIRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 	// Tools
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
 		for _, t := range tools.Array() {
+			// Handle google_search extension
 			if gs := t.Get("google_search"); gs.Exists() {
 				if req.Metadata == nil {
 					req.Metadata = make(map[string]any)
@@ -89,6 +90,19 @@ func ParseOpenAIRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 				}
 				continue
 			}
+			
+			// Handle code_execution extension
+			if ce := t.Get("code_execution"); ce.Exists() {
+				addGoogleTool(req, "codeExecution", ce.Value())
+				continue
+			}
+			
+			// Handle url_context extension (grounding)
+			if uc := t.Get("url_context"); uc.Exists() {
+				addGoogleTool(req, "urlContext", uc.Value())
+				continue
+			}
+
 			if tool := parseOpenAITool(t); tool != nil {
 				req.Tools = append(req.Tools, *tool)
 			}
@@ -142,6 +156,15 @@ func ParseOpenAIRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 	}
 
 	return req, nil
+}
+
+func addGoogleTool(req *ir.UnifiedChatRequest, key string, value interface{}) {
+	if req.Metadata == nil {
+		req.Metadata = make(map[string]any)
+	}
+	tools, _ := req.Metadata["google_tools"].([]any)
+	tools = append(tools, map[string]interface{}{key: value})
+	req.Metadata["google_tools"] = tools
 }
 
 // parseResponsesAPIFields extracts Responses API specific fields into unified format.

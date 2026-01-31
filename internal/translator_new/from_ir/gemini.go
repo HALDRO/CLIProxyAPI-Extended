@@ -238,7 +238,10 @@ func (p *GeminiProvider) applyUserMessage(contents *[]interface{}, msg ir.Messag
 	for _, part := range msg.Content {
 		switch part.Type {
 		case ir.ContentTypeText:
-			parts = append(parts, map[string]interface{}{"text": part.Text})
+			// Skip empty text parts (Gemini API requirement: oneof data must be initialized)
+			if part.Text != "" {
+				parts = append(parts, map[string]interface{}{"text": part.Text})
+			}
 		case ir.ContentTypeImage:
 			if part.Image != nil {
 				parts = append(parts, map[string]interface{}{
@@ -473,6 +476,17 @@ func (p *GeminiProvider) applyTools(root map[string]interface{}, req *ir.Unified
 		googleSearch = map[string]interface{}{}
 	}
 
+	// Add special Google tools (code_execution, url_context) from metadata
+	// These come from OpenAI request passthrough
+	var extraTools []interface{}
+	if req.Metadata != nil {
+		if tools, ok := req.Metadata["google_tools"].([]any); ok {
+			for _, t := range tools {
+				extraTools = append(extraTools, t)
+			}
+		}
+	}
+
 	// Filter out networking tools from functionDeclarations (they're handled via googleSearch)
 	var funcs []interface{}
 	if len(req.Tools) > 0 {
@@ -512,6 +526,12 @@ func (p *GeminiProvider) applyTools(root map[string]interface{}, req *ir.Unified
 		tools = append(tools, map[string]interface{}{"functionDeclarations": funcs})
 	} else if googleSearch != nil {
 		tools = append(tools, map[string]interface{}{"googleSearch": googleSearch})
+	}
+	
+	// Add extra Google tools (codeExecution, urlContext)
+	// These can typically exist alongside functionDeclarations in newer API versions
+	if len(extraTools) > 0 {
+		tools = append(tools, extraTools...)
 	}
 
 	if len(tools) > 0 {
