@@ -19,7 +19,7 @@ func newAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewQwenAuthenticator(),
 		sdkAuth.NewIFlowAuthenticator(),
 		sdkAuth.NewAntigravityAuthenticator(),
-		sdkAuth.NewClineAuthenticator(),
+		sdkAuth.NewKiloCodeAuthenticator(),
 		sdkAuth.NewKiroAuthenticator(),
 		sdkAuth.NewGitHubCopilotAuthenticator(),
 	)

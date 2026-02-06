@@ -167,7 +167,7 @@ func convertRequestToIR(from sdktranslator.Format, model string, payload []byte,
 	var err error
 
 	switch from.String() {
-	case "openai", "cline":
+	case "openai":
 		irReq, err = to_ir.ParseOpenAIRequest(payload)
 	case "ollama":
 		irReq, err = to_ir.ParseOllamaRequest(payload)
@@ -270,7 +270,7 @@ func TranslateClaudeResponseStream(cfg *config.Config, to sdktranslator.Format, 
 	var chunks [][]byte
 
 	switch toStr {
-	case "openai", "cline":
+	case "openai":
 		for _, event := range events {
 			chunk, err := from_ir.ToOpenAIChunk(event, model, msgID, event.ToolCallIndex)
 			if err != nil {
@@ -334,7 +334,7 @@ func convertUnifiedEventsToChunks(events []ir.UnifiedEvent, to sdktranslator.For
 	toStr := to.String()
 
 	switch toStr {
-	case "openai", "cline":
+	case "openai":
 		for i := range events {
 			event := &events[i]
 
@@ -524,8 +524,8 @@ func TranslateGeminiResponseNonStream(cfg *config.Config, to sdktranslator.Forma
 		messageID = meta.ResponseID
 	}
 
-	// Special handling for OpenAI/Cline targets to include Gemini metadata
-	if to.String() == "openai" || to.String() == "cline" {
+	// Special handling for OpenAI targets to include Gemini metadata
+	if to.String() == "openai" {
 		var openaiMeta *ir.OpenAIMeta
 		if meta != nil {
 			openaiMeta = &ir.OpenAIMeta{
@@ -567,7 +567,7 @@ func TranslateOpenAIResponseNonStream(cfg *config.Config, to sdktranslator.Forma
 // convertIRToNonStreamResponse is the common finisher for non-stream responses.
 func convertIRToNonStreamResponse(to sdktranslator.Format, messages []ir.Message, usage *ir.Usage, model, messageID string) ([]byte, error) {
 	switch to.String() {
-	case "openai", "cline":
+	case "openai":
 		return from_ir.ToOpenAIChatCompletion(messages, usage, model, messageID)
 	case "claude":
 		return from_ir.ToClaudeResponse(messages, usage, model, messageID)
@@ -595,7 +595,7 @@ func TranslateResponseNonStreamAuto(cfg *config.Config, provider string, to sdkt
 		translated, err = TranslateGeminiResponseNonStream(cfg, to, resp, model)
 	case "claude":
 		translated, err = TranslateClaudeResponseNonStream(cfg, to, resp, model)
-	case "openai", "cline", "ollama":
+	case "openai", "ollama":
 		translated, err = TranslateOpenAIResponseNonStream(cfg, to, resp, model)
 	case "codex":
 		messages, usage, err := to_ir.ParseCodexResponse(resp)
@@ -629,7 +629,7 @@ func TranslateResponseStreamAuto(cfg *config.Config, provider string, to sdktran
 		chunks, err = TranslateAntigravityResponseStream(cfg, to, chunk, model, msgID, unifiedState)
 	case "gemini", "aistudio":
 		chunks, err = TranslateGeminiResponseStream(cfg, to, chunk, model, msgID, unifiedState)
-	case "openai", "cline", "ollama":
+	case "openai", "ollama":
 		chunks, err = TranslateOpenAIResponseStream(cfg, to, chunk, model, msgID, unifiedState)
 	case "claude":
 		// Claude wrapper still uses specific state type for consistency with parser

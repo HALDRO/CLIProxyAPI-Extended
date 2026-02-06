@@ -76,7 +76,7 @@ func main() {
 	var qwenLogin bool
 	var iflowLogin bool
 	var iflowCookie bool
-	var clineLogin bool
+	var kiloCodeLogin bool
 	var noBrowser bool
 	var oauthCallbackPort int
 	var antigravityLogin bool
@@ -100,7 +100,7 @@ func main() {
 	flag.BoolVar(&qwenLogin, "qwen-login", false, "Login to Qwen using OAuth")
 	flag.BoolVar(&iflowLogin, "iflow-login", false, "Login to iFlow using OAuth")
 	flag.BoolVar(&iflowCookie, "iflow-cookie", false, "Login to iFlow using Cookie")
-	flag.BoolVar(&clineLogin, "cline-login", false, "Login to Cline using refresh token")
+	flag.BoolVar(&kiloCodeLogin, "kilocode-login", false, "Login to KiloCode (Roo Code Cloud) using Clerk session")
 	flag.BoolVar(&noBrowser, "no-browser", false, "Don't open browser automatically for OAuth")
 	flag.IntVar(&oauthCallbackPort, "oauth-callback-port", 0, "Override OAuth callback port (defaults to provider-specific port)")
 	flag.BoolVar(&useIncognito, "incognito", false, "Open browser in incognito/private mode for OAuth (useful for multiple accounts)")
@@ -508,8 +508,8 @@ func main() {
 		cmd.DoIFlowLogin(cfg, options)
 	} else if iflowCookie {
 		cmd.DoIFlowCookieAuth(cfg, options)
-	} else if clineLogin {
-		cmd.DoClineLogin(cfg, options)
+	} else if kiloCodeLogin {
+		cmd.DoKiloCodeLogin(cfg, options)
 	} else if kiroLogin || kiroGoogleLogin {
 		// For Kiro auth, default to incognito mode for multi-account support
 		// Users can explicitly override with --no-incognito

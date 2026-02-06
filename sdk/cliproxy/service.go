@@ -116,7 +116,7 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewCodexAuthenticator(),
 		sdkAuth.NewClaudeAuthenticator(),
 		sdkAuth.NewQwenAuthenticator(),
-		sdkAuth.NewClineAuthenticator(),
+		sdkAuth.NewKiloCodeAuthenticator(),
 	)
 }
 
@@ -396,8 +396,8 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 		s.coreManager.RegisterExecutor(executor.NewQwenExecutor(s.cfg))
 	case "iflow":
 		s.coreManager.RegisterExecutor(executor.NewIFlowExecutor(s.cfg))
-	case "cline":
-		s.coreManager.RegisterExecutor(executor.NewClineExecutor(s.cfg))
+	case "kilocode":
+		s.coreManager.RegisterExecutor(executor.NewKiloCodeExecutor(s.cfg))
 	case "kiro":
 		if s.cfg != nil && s.cfg.UseCanonicalTranslator {
 			s.coreManager.RegisterExecutor(executor.NewKiroExecutorV2(s.cfg))
@@ -810,8 +810,8 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 	case "iflow":
 		models = registry.GetIFlowModels()
 		models = applyExcludedModels(models, excluded)
-	case "cline":
-		models = registry.GetClineModels()
+	case "kilocode":
+		models = registry.GetKiloCodeModels()
 		models = applyExcludedModels(models, excluded)
 	case "github-copilot":
 		models = registry.GetGitHubCopilotModels()

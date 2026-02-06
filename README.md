@@ -1,6 +1,6 @@
 # CLIProxyAPI-Extended
 
-> Fork of [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus) with advanced Canonical IR architecture, full Ollama compatibility, and Cline integration
+> Fork of [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus) with advanced Canonical IR architecture and full Ollama compatibility.
 
 [![Original Repo](https://img.shields.io/badge/Original-router--for--me%2FCLIProxyAPI-blue)](https://github.com/router-for-me/CLIProxyAPI)
 [![Plus Version](https://img.shields.io/badge/Plus-router--for--me%2FCLIProxyAPIPlus-green)](https://github.com/router-for-me/CLIProxyAPIPlus)
@@ -12,7 +12,7 @@ This fork pioneered the **Canonical IR architecture** before the official Plus v
 | Feature | Description |
 |---------|-------------|
 | **Full Ollama Compatibility** | Complete bidirectional protocol support (`/api/chat`, `/api/generate`) with streaming — use any provider through Ollama API |
-| **Cline Integration** | Free models support (MiniMax M2, Grok Code Fast 1) |
+| **KiloCode Integration** | Built-in KiloCode provider with free models support (via Kilo gateway) and full device-auth login flow |
 | **Enhanced Stability** | Improved compatibility with Cursor, Copilot Chat, and other AI coding clients |
 | **Advanced Architecture** | Refined Canonical IR implementation with 54% codebase reduction (17,464 → 7,992 lines) |
 
@@ -38,7 +38,7 @@ show-provider-prefixes: true     # Visual provider prefixes (default)
 
 **Provider selection:** Without prefix (or with prefixes disabled), system uses **round-robin** for load balancing.
 
-**Note:** Ollama API and Cline require `use-canonical-translator: true`
+**Note:** Ollama API requires `use-canonical-translator: true`
 
 ## Architecture
 
@@ -49,9 +49,8 @@ show-provider-prefixes: true     # Visual provider prefixes (default)
     Claude ─────┤                       ├───── Claude
     Ollama ─────┼─────► Canonical ◄─────┼───── Gemini (AI Studio)
       Kiro ─────┤       IR              ├───── Gemini CLI
-     Cline ─────┤                       ├───── Antigravity
-   Copilot ─────┘                       ├───── Ollama
-                                        └───── Cline
+   Copilot ─────┘                       ├───── Antigravity
+                                        └───── Ollama
 ```
 
 **Result:** 21 files (7 parsers + 7 emitters + 6 IR core + 1 adapter), 7,992 lines
@@ -73,7 +72,7 @@ Ollama client (/api/chat, /api/generate)
     ↓ parse directly to IR (no OpenAI conversion)
 Canonical IR
     ↓ convert to provider format
-Provider (Gemini/Claude/OpenAI/Cline/etc.)
+Provider (Gemini/Claude/OpenAI/etc.)
     ↓ response through IR
 Ollama response (streaming/non-streaming)
 ```
@@ -92,7 +91,7 @@ Ollama response (streaming/non-streaming)
 | Gemini CLI    | ✅ (shared)          | ✅ CLI format        | ✅ Tested |
 | Antigravity   | ✅ Req/Resp          | ✅ v1internal        | ✅ Tested |
 | **Ollama**    | ✅ Req/Resp/Stream   | ✅ Req/Resp/Stream   | ✅ Tested |
-| **Cline**     | ✅ (via OpenAI)      | ✅ (via OpenAI)      | ✅ Tested |
+| **KiloCode**  | ✅ (via OpenAI)      | ✅ (via OpenAI)      | ✅ Tested |
 | Kiro          | ✅ Resp/Stream       | ✅ Req               | ✅ Tested |
 | Codex         | ✅ Req/Resp          | ✅ Responses API     | ✅ Tested |
 | Copilot       | ✅ (via OpenAI)      | ✅ (via OpenAI)      | ✅ Tested |
@@ -112,12 +111,8 @@ Ollama response (streaming/non-streaming)
 
 ## Authentication
 
-### Cline
-- Long-lived refresh token → short-lived JWT (~10 minutes)
-- JWT used with `workos:` prefix for API requests
-- **Note:** Obtaining refresh token requires Cline extension source modification
-
-
+### KiloCode
+KiloCode is supported as a first-class provider with a built-in device-auth login flow (no API key required for free-tier models).
 
 ### Other Providers
 Full OAuth2 flows with auto browser opening (Gemini, Claude, Codex, GitHub Copilot, etc.) — see [original documentation](https://help.router-for.me/)

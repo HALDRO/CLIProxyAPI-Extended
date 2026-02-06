@@ -66,7 +66,7 @@ func (a *Adapter) TranslateStream(ctx context.Context, from, to sdktranslator.Fo
 			state = &executor.GeminiCLIStreamState{ClaudeState: from_ir.NewClaudeStreamState()}
 		case "claude":
 			state = from_ir.NewClaudeStreamState()
-		case "openai", "codex", "cline", "ollama":
+		case "openai", "codex", "ollama":
 			state = &executor.OpenAIStreamState{}
 		default:
 			return nil, fmt.Errorf("canonical translator: unsupported stream provider %q", provider)

@@ -60,8 +60,8 @@ func providerIDToLabel(provider string) string {
 		return "Claude"
 	case "codex":
 		return "Codex"
-	case "cline":
-		return "Cline"
+	case "kilocode":
+		return "KiloCode"
 	case "qwen":
 		return "Qwen"
 	case "kiro":
@@ -87,8 +87,8 @@ func labelToProviderID(label string) string {
 		return "claude"
 	case "codex":
 		return "codex"
-	case "cline":
-		return "cline"
+	case "kilocode":
+		return "kilocode"
 	case "qwen":
 		return "qwen"
 	case "kiro":

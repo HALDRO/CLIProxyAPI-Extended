@@ -35,6 +35,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAIStudioModels()
 	case "codex":
 		return GetOpenAIModels()
+	case "kilocode":
+		return GetKiloCodeModels()
 	case "qwen":
 		return GetQwenModels()
 	case "iflow":
@@ -413,55 +415,32 @@ func GetKiroModels() []*ModelInfo {
 	}
 }
 
-// GetClineModels returns the standard Cline model definitions
-func GetClineModels() []*ModelInfo {
+// GetKiloCodeModels returns the standard KiloCode model definitions.
+func GetKiloCodeModels() []*ModelInfo {
 	return []*ModelInfo{
 		{
-			ID:                  "x-ai/grok-code-fast-1",
-			Object:              "model",
-			Created:             1735689600,
-			OwnedBy:             "cline",
-			Type:                "cline",
-			DisplayName:         "Grok Code Fast 1",
-			Description:         "xAI's Grok Coding model - fast model for coding",
-			ContextLength:       256000,
-			MaxCompletionTokens: 16384,
-			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
-		},
-		{
-			ID:                  "minimax/minimax-m2",
+			ID:                  "minimax/minimax-m2.1:free",
 			Object:              "model",
 			Created:             1758672000,
-			OwnedBy:             "cline",
-			Type:                "cline",
-			DisplayName:         "MiniMax M2",
-			Description:         "Open source model with good performance",
-			ContextLength:       192000,
-			MaxCompletionTokens: 128000,
+			OwnedBy:             "kilocode",
+			Type:                "kilocode",
+			DisplayName:         "MiniMax M2.1 (free)",
+			Description:         "MiniMax M2.1 free model via Kilo Gateway",
+			ContextLength:       204800,
+			MaxCompletionTokens: 131072,
 			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 		},
 		{
-			ID:                  "z-ai/glm-4.6",
+			ID:                  "z-ai/glm-4.7:free",
 			Object:              "model",
 			Created:             1750000000,
-			OwnedBy:             "cline",
-			Type:                "cline",
-			DisplayName:         "GLM 4.6",
-			Description:         "Zhipu AI's latest agentic coding model in GLM series",
-			ContextLength:       200000,
-			MaxCompletionTokens: 128000,
+			OwnedBy:             "kilocode",
+			Type:                "kilocode",
+			DisplayName:         "GLM 4.7 (free)",
+			Description:         "Z.AI GLM 4.7 free model via Kilo Gateway",
+			ContextLength:       202752,
+			MaxCompletionTokens: 16384,
 			Thinking:            &ThinkingSupport{Levels: []string{"none", "auto", "minimal", "low", "medium", "high", "xhigh"}},
-		},
-		{
-			ID:                  "mistralai/devstral-2512:free",
-			Object:              "model",
-			Created:             1750000000,
-			OwnedBy:             "cline",
-			Type:                "cline",
-			DisplayName:         "Devstral",
-			Description:         "Mistral's latest model with strong coding abilities",
-			ContextLength:       256000,
-			MaxCompletionTokens: 256000,
 		},
 	}
 }
