@@ -6,7 +6,6 @@
 package claude
 
 import (
-	"bytes"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
@@ -37,7 +36,7 @@ import (
 //   - []byte: The transformed request data in Gemini CLI API format
 func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) []byte {
 	enableThoughtTranslate := true
-	rawJSON := bytes.Clone(inputRawJSON)
+	rawJSON := inputRawJSON
 
 	// system instruction
 	systemInstructionJSON := ""
@@ -115,7 +114,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							if signatureResult.Exists() && signatureResult.String() != "" {
 								arrayClientSignatures := strings.SplitN(signatureResult.String(), "#", 2)
 								if len(arrayClientSignatures) == 2 {
-									if modelName == arrayClientSignatures[0] {
+									if cache.GetModelGroup(modelName) == arrayClientSignatures[0] {
 										clientSignature = arrayClientSignatures[1]
 									}
 								}

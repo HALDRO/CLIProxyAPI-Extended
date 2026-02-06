@@ -100,15 +100,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	to := sdktranslator.FromString("claude")
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
-	originalPayload := bytes.Clone(req.Payload)
+	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
-		originalPayload = bytes.Clone(opts.OriginalRequest)
+		originalPayloadSource = opts.OriginalRequest
 	}
-	var originalTranslated, body []byte
-	originalTranslated, body, err = sdktranslator.TranslateRequestPairE(ctx, from, to, baseModel, bytes.Clone(req.Payload), originalPayload, stream)
-	if err != nil {
-		return resp, err
-	}
+	originalPayload := originalPayloadSource
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, stream)
+	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
@@ -127,7 +125,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	body = disableThinkingIfToolChoiceForced(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
-	body = ensureCacheControl(body)
+	if countCacheControls(body) == 0 {
+		body = ensureCacheControl(body)
+	}
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -217,7 +217,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		to,
 		from,
 		req.Model,
-		bytes.Clone(opts.OriginalRequest),
+		opts.OriginalRequest,
 		bodyForTranslation,
 		data,
 		&param,
@@ -244,15 +244,13 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	defer reporter.trackFailure(ctx, &err)
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
-	originalPayload := bytes.Clone(req.Payload)
+	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
-		originalPayload = bytes.Clone(opts.OriginalRequest)
+		originalPayloadSource = opts.OriginalRequest
 	}
-	var originalTranslated, body []byte
-	originalTranslated, body, err = sdktranslator.TranslateRequestPairE(ctx, from, to, baseModel, bytes.Clone(req.Payload), originalPayload, true)
-	if err != nil {
-		return nil, err
-	}
+	originalPayload := originalPayloadSource
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
+	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
@@ -271,7 +269,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = disableThinkingIfToolChoiceForced(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
-	body = ensureCacheControl(body)
+	if countCacheControls(body) == 0 {
+		body = ensureCacheControl(body)
+	}
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -386,7 +386,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				to,
 				from,
 				req.Model,
-				bytes.Clone(opts.OriginalRequest),
+				opts.OriginalRequest,
 				bodyForTranslation,
 				bytes.Clone(line),
 				&param,
@@ -421,11 +421,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	to := sdktranslator.FromString("claude")
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
-	translatedReq, err := sdktranslator.TranslateRequestE(ctx, from, to, baseModel, bytes.Clone(req.Payload), stream)
-	if err != nil {
-		return cliproxyexecutor.Response{}, fmt.Errorf("translate request: %w", err)
-	}
-	body := translatedReq
+	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
@@ -1049,6 +1045,51 @@ func ensureCacheControl(payload []byte) []byte {
 	payload = injectMessagesCacheControl(payload)
 
 	return payload
+}
+
+func countCacheControls(payload []byte) int {
+	count := 0
+
+	// Check system
+	system := gjson.GetBytes(payload, "system")
+	if system.IsArray() {
+		system.ForEach(func(_, item gjson.Result) bool {
+			if item.Get("cache_control").Exists() {
+				count++
+			}
+			return true
+		})
+	}
+
+	// Check tools
+	tools := gjson.GetBytes(payload, "tools")
+	if tools.IsArray() {
+		tools.ForEach(func(_, item gjson.Result) bool {
+			if item.Get("cache_control").Exists() {
+				count++
+			}
+			return true
+		})
+	}
+
+	// Check messages
+	messages := gjson.GetBytes(payload, "messages")
+	if messages.IsArray() {
+		messages.ForEach(func(_, msg gjson.Result) bool {
+			content := msg.Get("content")
+			if content.IsArray() {
+				content.ForEach(func(_, item gjson.Result) bool {
+					if item.Get("cache_control").Exists() {
+						count++
+					}
+					return true
+				})
+			}
+			return true
+		})
+	}
+
+	return count
 }
 
 // injectMessagesCacheControl adds cache_control to the second-to-last user turn for multi-turn caching.

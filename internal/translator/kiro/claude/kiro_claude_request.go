@@ -17,7 +17,6 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-
 // Kiro API request structs - field order determines JSON key order
 
 // KiroPayload is the top-level request structure for Kiro API
@@ -33,7 +32,6 @@ type KiroInferenceConfig struct {
 	Temperature float64 `json:"temperature,omitempty"`
 	TopP        float64 `json:"topP,omitempty"`
 }
-
 
 // KiroConversationState holds the conversation context
 type KiroConversationState struct {
@@ -117,9 +115,11 @@ type KiroAssistantResponseMessage struct {
 
 // KiroToolUse represents a tool invocation by the assistant
 type KiroToolUse struct {
-	ToolUseID string                 `json:"toolUseId"`
-	Name      string                 `json:"name"`
-	Input     map[string]interface{} `json:"input"`
+	ToolUseID      string                 `json:"toolUseId"`
+	Name           string                 `json:"name"`
+	Input          map[string]interface{} `json:"input"`
+	IsTruncated    bool                   `json:"-"` // Internal flag, not serialized
+	TruncationInfo *TruncationInfo        `json:"-"` // Truncation details, not serialized
 }
 
 // ConvertClaudeRequestToKiro converts a Claude API request to Kiro format.
@@ -219,16 +219,35 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 	}
 
 	// Convert Claude tools to Kiro format
-	kiroTools := convertClaudeToolsToKiro(tools)
+	kiroTools, hasWebSearch := convertClaudeToolsToKiro(tools)
+
+	// If web_search was requested but filtered, inject alternative hint
+	if hasWebSearch {
+		webSearchHint := `[CRITICAL WEB ACCESS INSTRUCTION]
+You have the Fetch/read_url_content tool available. When the user asks about current events, weather, news, or any information that requires web access:
+- DO NOT say you cannot search the web
+- DO NOT refuse to help with web-related queries
+- IMMEDIATELY use the Fetch tool to access relevant URLs
+- Use well-known official websites, documentation sites, or API endpoints
+- Construct appropriate URLs based on the query context
+
+IMPORTANT: Always attempt to fetch information FIRST before declining. You CAN access the web via Fetch.`
+		if systemPrompt != "" {
+			systemPrompt += "\n" + webSearchHint
+		} else {
+			systemPrompt = webSearchHint
+		}
+		log.Infof("kiro: injected web_search alternative hint (tool was filtered)")
+	}
 
 	// Thinking mode implementation:
 	// Kiro API supports official thinking/reasoning mode via <thinking_mode> tag.
 	// When set to "enabled", Kiro returns reasoning content as official reasoningContentEvent
 	// rather than inline <thinking> tags in assistantResponseEvent.
-	// We use a high max_thinking_length to allow extensive reasoning.
+	// We cap max_thinking_length to reserve space for tool outputs and prevent truncation.
 	if thinkingEnabled {
 		thinkingHint := `<thinking_mode>enabled</thinking_mode>
-<max_thinking_length>200000</max_thinking_length>`
+<max_thinking_length>16000</max_thinking_length>`
 		if systemPrompt != "" {
 			systemPrompt = thinkingHint + "\n\n" + systemPrompt
 		} else {
@@ -378,7 +397,6 @@ func hasThinkingTagInBody(body []byte) bool {
 	return strings.Contains(bodyStr, "<thinking_mode>") || strings.Contains(bodyStr, "<max_thinking_length>")
 }
 
-
 // IsThinkingEnabledFromHeader checks if thinking mode is enabled via Anthropic-Beta header.
 // Claude CLI uses "Anthropic-Beta: interleaved-thinking-2025-05-14" to enable thinking.
 func IsThinkingEnabledFromHeader(headers http.Header) bool {
@@ -509,15 +527,27 @@ func ensureKiroInputSchema(parameters interface{}) interface{} {
 	}
 }
 
-// convertClaudeToolsToKiro converts Claude tools to Kiro format
-func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
+// convertClaudeToolsToKiro converts Claude tools to Kiro format.
+// Returns the converted tools and a boolean indicating if web_search was filtered.
+func convertClaudeToolsToKiro(tools gjson.Result) ([]KiroToolWrapper, bool) {
 	var kiroTools []KiroToolWrapper
+	hasWebSearch := false
 	if !tools.IsArray() {
-		return kiroTools
+		return kiroTools, hasWebSearch
 	}
 
 	for _, tool := range tools.Array() {
 		name := tool.Get("name").String()
+
+		// Filter out web_search/websearch tools (Kiro API doesn't support them)
+		// This matches the behavior in AIClient-2-API/claude-kiro.js
+		nameLower := strings.ToLower(name)
+		if nameLower == "web_search" || nameLower == "websearch" {
+			log.Debugf("kiro: skipping unsupported tool: %s", name)
+			hasWebSearch = true
+			continue
+		}
+
 		description := tool.Get("description").String()
 		inputSchemaResult := tool.Get("input_schema")
 		var inputSchema interface{}
@@ -561,7 +591,7 @@ func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 	// This prevents 500 errors when Claude Code sends too many tools
 	kiroTools = compressToolsIfNeeded(kiroTools)
 
-	return kiroTools
+	return kiroTools, hasWebSearch
 }
 
 // processMessages processes Claude messages and builds Kiro history
@@ -743,7 +773,35 @@ func BuildUserMessageStruct(msg gjson.Result, modelID, origin string) (KiroUserI
 				resultContent := part.Get("content")
 
 				var textContents []KiroTextContent
-				if resultContent.IsArray() {
+
+				// Check if this tool_result contains error from our SOFT_LIMIT_REACHED tool_use
+				// The client will return an error when trying to execute a tool with marker input
+				resultStr := resultContent.String()
+				isSoftLimitError := strings.Contains(resultStr, "SOFT_LIMIT_REACHED") ||
+					strings.Contains(resultStr, "_status") ||
+					strings.Contains(resultStr, "truncated") ||
+					strings.Contains(resultStr, "missing required") ||
+					strings.Contains(resultStr, "invalid input") ||
+					strings.Contains(resultStr, "Error writing file")
+
+				if isError && isSoftLimitError {
+					// Replace error content with SOFT_LIMIT_REACHED guidance
+					log.Infof("kiro: detected SOFT_LIMIT_REACHED in tool_result for %s, replacing with guidance", toolUseID)
+					softLimitMsg := `SOFT_LIMIT_REACHED
+
+Your previous tool call was incomplete due to API output size limits.
+The content was PARTIALLY transmitted but NOT executed.
+
+REQUIRED ACTION:
+1. Split your content into smaller chunks (max 300 lines per call)
+2. For file writes: Create file with first chunk, then use append for remaining
+3. Do NOT regenerate content you already attempted - continue from where you stopped
+
+STATUS: This is NOT an error. Continue with smaller chunks.`
+					textContents = append(textContents, KiroTextContent{Text: softLimitMsg})
+					// Mark as SUCCESS so Claude doesn't treat it as a failure
+					isError = false
+				} else if resultContent.IsArray() {
 					for _, item := range resultContent.Array() {
 						if item.Get("type").String() == "text" {
 							textContents = append(textContents, KiroTextContent{Text: item.Get("text").String()})
@@ -825,8 +883,21 @@ func BuildAssistantMessageStruct(msg gjson.Result) KiroAssistantResponseMessage 
 		contentBuilder.WriteString(content.String())
 	}
 
+	// CRITICAL FIX: Kiro API requires non-empty content for assistant messages
+	// This can happen with compaction requests where assistant messages have only tool_use
+	// (no text content). Without this fix, Kiro API returns "Improperly formed request" error.
+	finalContent := contentBuilder.String()
+	if strings.TrimSpace(finalContent) == "" {
+		if len(toolUses) > 0 {
+			finalContent = kirocommon.DefaultAssistantContentWithTools
+		} else {
+			finalContent = kirocommon.DefaultAssistantContent
+		}
+		log.Debugf("kiro: assistant content was empty, using default: %s", finalContent)
+	}
+
 	return KiroAssistantResponseMessage{
-		Content:  contentBuilder.String(),
+		Content:  finalContent,
 		ToolUses: toolUses,
 	}
 }

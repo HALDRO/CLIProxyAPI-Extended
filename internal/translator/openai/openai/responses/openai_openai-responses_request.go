@@ -1,7 +1,6 @@
 package responses
 
 import (
-	"bytes"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -28,7 +27,7 @@ import (
 // Returns:
 //   - []byte: The transformed request data in OpenAI chat completions format
 func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inputRawJSON []byte, stream bool) []byte {
-	rawJSON := bytes.Clone(inputRawJSON)
+	rawJSON := inputRawJSON
 	// Base OpenAI chat completions template with default values
 	out := `{"model":"","messages":[],"stream":false}`
 
@@ -68,6 +67,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			case "message", "":
 				// Handle regular message conversion
 				role := item.Get("role").String()
+				if role == "developer" {
+					role = "user"
+				}
 				message := `{"role":"","content":""}`
 				message, _ = sjson.Set(message, "role", role)
 
@@ -167,7 +169,8 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			// Only function tools need structural conversion because Chat Completions nests details under "function".
 			toolType := tool.Get("type").String()
 			if toolType != "" && toolType != "function" && tool.IsObject() {
-				chatCompletionsTools = append(chatCompletionsTools, tool.Value())
+				// Almost all providers lack built-in tools, so we just ignore them.
+				// chatCompletionsTools = append(chatCompletionsTools, tool.Value())
 				return true
 			}
 

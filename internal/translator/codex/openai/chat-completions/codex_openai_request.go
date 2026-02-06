@@ -7,12 +7,9 @@
 package chat_completions
 
 import (
-	"bytes"
-
 	"strconv"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -30,8 +27,7 @@ import (
 // Returns:
 //   - []byte: The transformed request data in OpenAI Responses API format
 func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
-	rawJSON := bytes.Clone(inputRawJSON)
-	userAgent := misc.ExtractCodexUserAgent(rawJSON)
+	rawJSON := inputRawJSON
 	// Start with empty JSON object
 	out := `{"instructions":""}`
 
@@ -97,10 +93,6 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 
 	// Extract system instructions from first system message (string or text object)
 	messages := gjson.GetBytes(rawJSON, "messages")
-	_, instructions := misc.CodexInstructionsForModel(modelName, "", userAgent)
-	if misc.GetCodexInstructionsEnabled() {
-		out, _ = sjson.Set(out, "instructions", instructions)
-	}
 	// if messages.IsArray() {
 	// 	arr := messages.Array()
 	// 	for i := 0; i < len(arr); i++ {

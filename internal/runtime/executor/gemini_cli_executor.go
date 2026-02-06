@@ -119,14 +119,14 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini-cli")
 
-	originalPayload := bytes.Clone(req.Payload)
+	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
-		originalPayload = bytes.Clone(opts.OriginalRequest)
+		originalPayloadSource = opts.OriginalRequest
 	}
-	originalTranslated, basePayload, err := sdktranslator.TranslateRequestPairE(ctx, from, to, baseModel, bytes.Clone(req.Payload), originalPayload, false)
-	if err != nil {
-		return resp, err
-	}
+	originalPayload := originalPayloadSource
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
+	basePayload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+
 
 	basePayload, err = thinking.ApplyThinking(basePayload, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -225,10 +225,8 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
 			reporter.publish(ctx, parseGeminiCLIUsage(data))
 			var param any
-			out, err := sdktranslator.TranslateNonStreamE(respCtx, to, from, attemptModel, bytes.Clone(opts.OriginalRequest), payload, data, &param)
-			if err != nil {
-				return resp, fmt.Errorf("translate response: %w", err)
-			}
+	out := sdktranslator.TranslateNonStream(respCtx, to, from, attemptModel, opts.OriginalRequest, payload, data, &param)
+
 			resp = cliproxyexecutor.Response{Payload: []byte(out)}
 			return resp, nil
 		}
@@ -277,14 +275,14 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini-cli")
 
-	originalPayload := bytes.Clone(req.Payload)
+	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
-		originalPayload = bytes.Clone(opts.OriginalRequest)
+		originalPayloadSource = opts.OriginalRequest
 	}
-	originalTranslated, basePayload, err := sdktranslator.TranslateRequestPairE(ctx, from, to, baseModel, bytes.Clone(req.Payload), originalPayload, true)
-	if err != nil {
-		return nil, err
-	}
+	originalPayload := originalPayloadSource
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
+	basePayload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+
 
 	basePayload, err = thinking.ApplyThinking(basePayload, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -406,23 +404,16 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 						reporter.publish(ctx, detail)
 					}
 					if bytes.HasPrefix(line, dataTag) {
-						segments, err := sdktranslator.TranslateStreamE(respCtx, to, from, attemptModel, bytes.Clone(opts.OriginalRequest), reqBody, bytes.Clone(line), &param)
-						if err != nil {
-							reporter.publishFailure(ctx)
-							out <- cliproxyexecutor.StreamChunk{Err: err}
-							return
-						}
+						segments := sdktranslator.TranslateStream(respCtx, to, from, attemptModel, opts.OriginalRequest, reqBody, bytes.Clone(line), &param)
 						for i := range segments {
 							out <- cliproxyexecutor.StreamChunk{Payload: []byte(segments[i])}
 						}
 					}
 				}
 
-				segments, err := sdktranslator.TranslateStreamE(respCtx, to, from, attemptModel, bytes.Clone(opts.OriginalRequest), reqBody, bytes.Clone([]byte("[DONE]")), &param)
-				if err == nil {
-					for i := range segments {
-						out <- cliproxyexecutor.StreamChunk{Payload: []byte(segments[i])}
-					}
+				segments := sdktranslator.TranslateStream(respCtx, to, from, attemptModel, opts.OriginalRequest, reqBody, []byte("[DONE]"), &param)
+				for i := range segments {
+					out <- cliproxyexecutor.StreamChunk{Payload: []byte(segments[i])}
 				}
 				if errScan := scanner.Err(); errScan != nil {
 					recordAPIResponseError(ctx, e.cfg, errScan)
@@ -442,22 +433,15 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			appendAPIResponseChunk(ctx, e.cfg, data)
 			reporter.publish(ctx, parseGeminiCLIUsage(data))
 			var param any
-			segments, err := sdktranslator.TranslateStreamE(respCtx, to, from, attemptModel, bytes.Clone(opts.OriginalRequest), reqBody, data, &param)
-			if err != nil {
-				recordAPIResponseError(ctx, e.cfg, err)
-				reporter.publishFailure(ctx)
-				out <- cliproxyexecutor.StreamChunk{Err: err}
-				return
-			}
+			segments := sdktranslator.TranslateStream(respCtx, to, from, attemptModel, opts.OriginalRequest, reqBody, data, &param)
+
 			for i := range segments {
 				out <- cliproxyexecutor.StreamChunk{Payload: []byte(segments[i])}
 			}
 
-			segments, err = sdktranslator.TranslateStreamE(respCtx, to, from, attemptModel, bytes.Clone(opts.OriginalRequest), reqBody, bytes.Clone([]byte("[DONE]")), &param)
-			if err == nil {
-				for i := range segments {
-					out <- cliproxyexecutor.StreamChunk{Payload: []byte(segments[i])}
-				}
+			segments = sdktranslator.TranslateStream(respCtx, to, from, attemptModel, opts.OriginalRequest, reqBody, []byte("[DONE]"), &param)
+			for i := range segments {
+				out <- cliproxyexecutor.StreamChunk{Payload: []byte(segments[i])}
 			}
 		}(httpResp, append([]byte(nil), payload...), attemptModel)
 
@@ -507,7 +491,7 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 	// The loop variable attemptModel is only used as the concrete model id sent to the upstream
 	// Gemini CLI endpoint when iterating fallback variants.
 	for range models {
-		payload := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), false)
+		payload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
 		payload, err = thinking.ApplyThinking(payload, req.Model, from.String(), to.String(), e.Identifier())
 		if err != nil {
