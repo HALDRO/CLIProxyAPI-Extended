@@ -416,6 +416,8 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 		s.coreManager.RegisterExecutor(executor.NewIFlowExecutor(s.cfg))
 	case "kilocode":
 		s.coreManager.RegisterExecutor(executor.NewKiloCodeExecutor(s.cfg))
+	case "kimi":
+		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
 	case "kiro":
 		if s.cfg != nil && s.cfg.UseCanonicalTranslator {
 			s.coreManager.RegisterExecutor(executor.NewKiroExecutorV2(s.cfg))
@@ -839,6 +841,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	case "kilocode":
 		models = registry.GetKiloCodeModels()
+		models = applyExcludedModels(models, excluded)
+	case "kimi":
+		models = registry.GetKimiModels()
 		models = applyExcludedModels(models, excluded)
 	case "github-copilot":
 		models = registry.GetGitHubCopilotModels()
