@@ -17,7 +17,7 @@ func ToCodexRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 	// Build tool call context: map tool_call_id -> tool_name for custom tool detection
 	toolCallContext := buildToolCallContext(req.Messages, req.Tools)
 
-	// Build input array - convert system messages to user messages.
+	// Build input array - convert system messages to developer messages.
 	// Codex doesn't support role:system in input[], and instructions are validated.
 	var input []interface{}
 	for _, msg := range req.Messages {
@@ -25,7 +25,7 @@ func ToCodexRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 			if text := ir.CombineTextParts(msg); text != "" {
 				input = append(input, map[string]interface{}{
 					"type": "message",
-					"role": "user",
+					"role": "developer",
 					"content": []interface{}{
 						map[string]interface{}{"type": "input_text", "text": text},
 					},

@@ -32,6 +32,8 @@ func (a *Adapter) TranslateRequest(ctx context.Context, from, to sdktranslator.F
 		return executor.TranslateToClaude(cfg, from, model, payload, stream, nil)
 	case "openai":
 		return executor.TranslateToOpenAI(cfg, from, model, payload, stream, nil, executor.FormatChatCompletions)
+	case "openai-response":
+		return executor.TranslateToOpenAI(cfg, from, model, payload, stream, nil, executor.FormatResponsesAPI)
 	case "codex":
 		// Codex uses a stricter Responses API upstream.
 		return executor.TranslateToCodex(cfg, from, model, payload, stream, nil)
@@ -66,7 +68,7 @@ func (a *Adapter) TranslateStream(ctx context.Context, from, to sdktranslator.Fo
 			state = &executor.GeminiCLIStreamState{ClaudeState: from_ir.NewClaudeStreamState()}
 		case "claude":
 			state = from_ir.NewClaudeStreamState()
-		case "openai", "codex", "ollama":
+		case "openai", "openai-response", "codex", "ollama":
 			state = &executor.OpenAIStreamState{}
 		default:
 			return nil, fmt.Errorf("canonical translator: unsupported stream provider %q", provider)

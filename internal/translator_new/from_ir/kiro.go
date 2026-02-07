@@ -110,13 +110,27 @@ type ImageSource struct {
 func (p *KiroProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 	origin := extractOrigin(req)
 	tools := extractToolsStruct(req.Tools)
+	injectWebSearchHint := false
+	if ir.DetectsNetworkingTool(req.Tools) {
+		// Kiro API doesn't support web_search built-in tools.
+		// We filter them out from tool specs and inject a hint to use Fetch/read_url_content instead.
+		injectWebSearchHint = true
+	}
+	if injectWebSearchHint {
+		tools = filterNetworkingTools(tools)
+	}
+	
 	systemPrompt := extractSystemPrompt(req.Messages)
+	if injectWebSearchHint {
+		systemPrompt = injectWebSearchAlternativeHint(systemPrompt)
+	}
 
 	// Inject thinking mode configuration if present
 	// Kiro/Amazon Q supports official thinking mode via <thinking_mode> tag in system prompt
+	// Keep max_thinking_length conservative to reserve space for tool outputs and avoid truncation.
 	if req.Thinking != nil && (req.Thinking.IncludeThoughts || req.Thinking.Budget > 0) {
 		thinkingHint := `<thinking_mode>enabled</thinking_mode>
-<max_thinking_length>200000</max_thinking_length>`
+<max_thinking_length>16000</max_thinking_length>`
 		if systemPrompt != "" {
 			systemPrompt = thinkingHint + "\n\n" + systemPrompt
 		} else {
@@ -240,6 +254,48 @@ func extractSystemPrompt(messages []ir.Message) string {
 	return strings.Join(parts, "\n")
 }
 
+func filterNetworkingTools(tools []ToolSpecification) []ToolSpecification {
+	if len(tools) == 0 {
+		return tools
+	}
+	out := make([]ToolSpecification, 0, len(tools))
+	for _, t := range tools {
+		name := t.ToolSpecification.Name
+		if ir.IsNetworkingToolName(name) {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+func injectWebSearchAlternativeHint(systemPrompt string) string {
+	webSearchHint := `[CRITICAL WEB ACCESS INSTRUCTION]
+You have the Fetch/read_url_content tool available. When the user asks about current events, weather, news, or any information that requires web access:
+- DO NOT say you cannot search the web
+- DO NOT refuse to help with web-related queries
+- IMMEDIATELY use the Fetch tool to access relevant URLs
+- Use well-known official websites, documentation sites, or API endpoints
+- Construct appropriate URLs based on the query context
+
+IMPORTANT: Always attempt to fetch information FIRST before declining. You CAN access the web via Fetch.`
+
+	systemPrompt = strings.TrimSpace(systemPrompt)
+	if systemPrompt == "" {
+		return webSearchHint
+	}
+	return systemPrompt + "\n\n" + webSearchHint
+}
+
+const kiroMaxHistoryMessages = 50
+
+func truncateHistoryIfNeeded(history []HistoryMessage) []HistoryMessage {
+	if len(history) <= kiroMaxHistoryMessages {
+		return history
+	}
+	return history[len(history)-kiroMaxHistoryMessages:]
+}
+
 func processMessagesStruct(messages []ir.Message, tools []ToolSpecification, modelID, origin string) ([]HistoryMessage, CurrentMessage) {
 	nonSystem := filterSystemMessages(messages)
 	nonSystem = mergeConsecutiveMessages(nonSystem)
@@ -263,6 +319,7 @@ func processMessagesStruct(messages []ir.Message, tools []ToolSpecification, mod
 	// If last is User, it's CurrentMessage. Rest is history.
 	if lastMsg.Role == ir.RoleUser {
 		history := buildHistoryStruct(nonSystem[:len(nonSystem)-1], tools, modelID, origin)
+		history = truncateHistoryIfNeeded(history)
 		current := buildUserMessageStruct(lastMsg, tools, modelID, origin, true)
 		return history, CurrentMessage{UserInputMessage: *current}
 	}
@@ -274,6 +331,7 @@ func processMessagesStruct(messages []ir.Message, tools []ToolSpecification, mod
 	trailingStart := findTrailingStart(nonSystem)
 
 	history := buildHistoryStruct(nonSystem[:trailingStart], tools, modelID, origin)
+	history = truncateHistoryIfNeeded(history)
 
 	var currentMsg UserInputMessage
 
@@ -370,8 +428,20 @@ func buildAssistantMessageStruct(msg ir.Message) *AssistantResponseMessage {
 			Input:     ir.ParseToolCallArgs(tc.Args),
 		})
 	}
+
+	content := strings.TrimSpace(ir.CombineTextParts(msg))
+	if content == "" {
+		// Kiro API requires non-empty assistant content.
+		// This happens in compaction/tool-only assistant turns.
+		if len(toolUses) > 0 {
+			content = "I'll help you with that."
+		} else {
+			content = "I understand."
+		}
+	}
+
 	return &AssistantResponseMessage{
-		Content:  ir.CombineTextParts(msg),
+		Content:  content,
 		ToolUses: toolUses,
 	}
 }

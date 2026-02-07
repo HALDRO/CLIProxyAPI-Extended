@@ -5,6 +5,7 @@ package from_ir
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
@@ -426,8 +427,17 @@ func ToOpenAIChatCompletionMeta(messages []ir.Message, usage *ir.Usage, model, m
 			msgContent["tool_calls"] = tcs
 		}
 
+		// Determine finish_reason:
+		// - If tool calls exist: tool_calls
+		// - Else if upstream reports MAX_TOKENS: length
+		// - Else: stop
+		finishReason := builder.DetermineFinishReason()
+		if finishReason != "tool_calls" && meta != nil && strings.EqualFold(meta.NativeFinishReason, "MAX_TOKENS") {
+			finishReason = "length"
+		}
+
 		choiceObj := map[string]interface{}{
-			"index": 0, "finish_reason": builder.DetermineFinishReason(), "message": msgContent,
+			"index": 0, "finish_reason": finishReason, "message": msgContent,
 		}
 		if meta != nil && meta.NativeFinishReason != "" {
 			choiceObj["native_finish_reason"] = meta.NativeFinishReason

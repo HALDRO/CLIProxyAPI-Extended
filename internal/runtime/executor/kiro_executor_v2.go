@@ -36,19 +36,29 @@ import (
 )
 
 const (
-	// Primary endpoint (from Plus version)
-	kiroPrimaryURL = "https://q.us-east-1.amazonaws.com"
-	// Fallback endpoint (original)
-	kiroFallbackURL = "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse"
+	// Kiro API common constants
+	kiroDefaultRegionV2 = "us-east-1"
+
+	// Primary endpoint (Amazon Q) - region aware
+	// NOTE: Q endpoint supports /generateAssistantResponse and does NOT require X-Amz-Target.
+	kiroPrimaryURLTemplateV2 = "https://q.%s.amazonaws.com/generateAssistantResponse"
+	// Fallback endpoint (CodeWhisperer) - region aware
+	kiroFallbackURLTemplateV2 = "https://codewhisperer.%s.amazonaws.com/generateAssistantResponse"
 
 	kiroRefreshSkew    = 5 * time.Minute
 	kiroRequestTimeout = 120 * time.Second
 	kiroMaxRetries     = 2
 
 	// Kiro API headers
-	kiroContentTypeV2  = "application/x-amz-json-1.0"
-	kiroTargetV2       = "AmazonCodeWhispererStreamingService.GenerateAssistantResponse"
+	// Q endpoint uses plain JSON.
+	kiroContentTypeV2 = "application/json"
+	// CodeWhisperer endpoint requires X-Amz-Target.
+	kiroTargetV2 = "AmazonCodeWhispererStreamingService.GenerateAssistantResponse"
+	// Streaming responses are returned as AWS EventStream frames.
 	kiroAcceptStreamV2 = "application/vnd.amazon.eventstream"
+
+	// Kiro-specific headers (match upstream executor behavior)
+	kiroAgentModeHeaderV2 = "vibe"
 
 	// kiroAgenticSystemPrompt prevents AWS Kiro API timeouts during large file operations.
 	kiroAgenticSystemPrompt = `
@@ -320,6 +330,9 @@ type requestContext struct {
 	origin       string
 	isAgentic    bool
 	sourceFormat string
+
+	apiRegion    string
+	useFallback  bool
 }
 
 func (e *KiroExecutorV2) prepareRequest(ctx context.Context, auth *coreauth.Auth, req cliproxyexecutor.Request, sourceFormat string) (*requestContext, error) {
@@ -363,9 +376,11 @@ func (e *KiroExecutorV2) prepareRequest(ctx context.Context, auth *coreauth.Auth
 		rc.irReq.Metadata = make(map[string]any)
 	}
 
-	// Set profile ARN
+	// Set profile ARN (only for social auth; AWS SSO OIDC must NOT send it)
 	if arn := getMetaString(rc.auth.Metadata, "profile_arn", "profileArn"); arn != "" {
-		rc.irReq.Metadata["profileArn"] = arn
+		if shouldSendProfileArn(rc.auth) {
+			rc.irReq.Metadata["profileArn"] = arn
+		}
 	}
 
 	// Set origin for quota management
@@ -374,6 +389,12 @@ func (e *KiroExecutorV2) prepareRequest(ctx context.Context, auth *coreauth.Auth
 	// Inject agentic system prompt if needed
 	if rc.isAgentic {
 		e.injectAgenticPrompt(rc.irReq)
+	}
+
+	// Determine API region (do NOT use OIDC region for API calls)
+	rc.apiRegion = determineKiroAPIRegion(rc.auth)
+	if rc.apiRegion == "" {
+		rc.apiRegion = kiroDefaultRegionV2
 	}
 
 	rc.kiroBody, err = (&from_ir.KiroProvider{}).ConvertRequest(rc.irReq)
@@ -404,14 +425,29 @@ func (e *KiroExecutorV2) injectAgenticPrompt(req *ir.UnifiedChatRequest) {
 	req.Messages = append([]ir.Message{systemMsg}, req.Messages...)
 }
 
-func (e *KiroExecutorV2) buildHTTPRequest(rc *requestContext, url string) (*http.Request, error) {
-	httpReq, err := http.NewRequestWithContext(rc.ctx, "POST", url, bytes.NewReader(rc.kiroBody))
+func (e *KiroExecutorV2) buildHTTPRequest(rc *requestContext) (*http.Request, error) {
+	url := fmt.Sprintf(kiroPrimaryURLTemplateV2, rc.apiRegion)
+	if rc.useFallback {
+		url = fmt.Sprintf(kiroFallbackURLTemplateV2, rc.apiRegion)
+	}
+
+	httpReq, err := http.NewRequestWithContext(rc.ctx, http.MethodPost, url, bytes.NewReader(rc.kiroBody))
 	if err != nil {
 		return nil, err
 	}
+
 	httpReq.Header.Set("Content-Type", kiroContentTypeV2)
-	httpReq.Header.Set("x-amz-target", kiroTargetV2)
 	httpReq.Header.Set("Accept", kiroAcceptStreamV2)
+
+	// Q endpoint does NOT require X-Amz-Target.
+	if rc.useFallback {
+		httpReq.Header.Set("X-Amz-Target", kiroTargetV2)
+	}
+
+	// Kiro-specific headers (match upstream behavior)
+	httpReq.Header.Set("x-amzn-kiro-agent-mode", kiroAgentModeHeaderV2)
+	httpReq.Header.Set("x-amzn-codewhisperer-optout", "true")
+
 	if rc.token != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+rc.token)
 	}
@@ -445,12 +481,8 @@ func (e *KiroExecutorV2) executeWithRetry(rc *requestContext) (cliproxyexecutor.
 			initialOrigin = currentOrigin // Update so we don't rebuild unnecessarily
 		}
 
-		url := kiroPrimaryURL
-		if useFallbackURL {
-			url = kiroFallbackURL
-		}
-
-		httpReq, err := e.buildHTTPRequest(rc, url)
+		rc.useFallback = useFallbackURL
+		httpReq, err := e.buildHTTPRequest(rc)
 		if err != nil {
 			return cliproxyexecutor.Response{}, err
 		}
@@ -619,12 +651,8 @@ func (e *KiroExecutorV2) executeStreamWithRetry(rc *requestContext) (<-chan clip
 			initialOrigin = currentOrigin // Update so we don't rebuild unnecessarily
 		}
 
-		url := kiroPrimaryURL
-		if useFallbackURL {
-			url = kiroFallbackURL
-		}
-
-		httpReq, err := e.buildHTTPRequest(rc, url)
+		rc.useFallback = useFallbackURL
+		httpReq, err := e.buildHTTPRequest(rc)
 		if err != nil {
 			return nil, err
 		}
@@ -838,6 +866,73 @@ func getMetaString(meta map[string]interface{}, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func determineKiroAPIRegion(auth *coreauth.Auth) string {
+	if auth == nil || auth.Metadata == nil {
+		return ""
+	}
+
+	// Priority 1: explicit override
+	if r, ok := auth.Metadata["api_region"].(string); ok {
+		r = strings.TrimSpace(r)
+		if r != "" {
+			return r
+		}
+	}
+
+	// Priority 2: extract from profile_arn
+	if arn, ok := auth.Metadata["profile_arn"].(string); ok {
+		if r := extractRegionFromProfileARNV2(strings.TrimSpace(arn)); r != "" {
+			return r
+		}
+	}
+
+	// IMPORTANT: Do NOT use auth.Metadata["region"] here.
+	// That field may refer to OIDC/refresh region and can break API calls.
+	return ""
+}
+
+func extractRegionFromProfileARNV2(profileArn string) string {
+	if profileArn == "" {
+		return ""
+	}
+	parts := strings.Split(profileArn, ":")
+	if len(parts) >= 4 && parts[3] != "" {
+		return parts[3]
+	}
+	return ""
+}
+
+func shouldSendProfileArn(auth *coreauth.Auth) bool {
+	if auth == nil || auth.Metadata == nil {
+		return true
+	}
+
+	// Check 1: auth_method field
+	if authMethod, ok := auth.Metadata["auth_method"].(string); ok {
+		s := strings.ToLower(strings.TrimSpace(authMethod))
+		if s == "builder-id" || s == "idc" {
+			return false
+		}
+	}
+
+	// Check 2: auth_type field
+	if authType, ok := auth.Metadata["auth_type"].(string); ok {
+		s := strings.ToLower(strings.TrimSpace(authType))
+		if s == "aws_sso_oidc" {
+			return false
+		}
+	}
+
+	// Check 3: client_id + client_secret presence
+	_, hasClientID := auth.Metadata["client_id"].(string)
+	_, hasClientSecret := auth.Metadata["client_secret"].(string)
+	if hasClientID && hasClientSecret {
+		return false
+	}
+
+	return true
 }
 
 func parseTokenExpiry(meta map[string]interface{}) time.Time {

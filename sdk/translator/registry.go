@@ -117,7 +117,20 @@ func Register(from, to Format, request RequestTransform, response ResponseTransf
 }
 
 // TranslateRequest is a helper on the default registry.
+// When the canonical translator is enabled, it delegates exclusively to the CanonicalAdapter.
+// No fallback to legacy — errors surface immediately rather than being masked.
 func TranslateRequest(from, to Format, model string, rawJSON []byte, stream bool) []byte {
+	if canonicalEnabled.Load() {
+		ad, ok := getCanonicalAdapter()
+		if !ok {
+			return rawJSON
+		}
+		result, err := ad.TranslateRequest(context.Background(), from, to, model, rawJSON, stream)
+		if err != nil {
+			return rawJSON
+		}
+		return result
+	}
 	return defaultRegistry.TranslateRequest(from, to, model, rawJSON, stream)
 }
 
@@ -127,12 +140,38 @@ func HasResponseTransformer(from, to Format) bool {
 }
 
 // TranslateStream is a helper on the default registry.
+// When the canonical translator is enabled, it delegates exclusively to the CanonicalAdapter.
+// No fallback to legacy — errors surface immediately rather than being masked.
 func TranslateStream(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string {
+	if canonicalEnabled.Load() {
+		ad, ok := getCanonicalAdapter()
+		if !ok {
+			return []string{string(rawJSON)}
+		}
+		result, err := ad.TranslateStream(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)
+		if err != nil {
+			return []string{string(rawJSON)}
+		}
+		return result
+	}
 	return defaultRegistry.TranslateStream(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)
 }
 
 // TranslateNonStream is a helper on the default registry.
+// When the canonical translator is enabled, it delegates exclusively to the CanonicalAdapter.
+// No fallback to legacy — errors surface immediately rather than being masked.
 func TranslateNonStream(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) string {
+	if canonicalEnabled.Load() {
+		ad, ok := getCanonicalAdapter()
+		if !ok {
+			return string(rawJSON)
+		}
+		result, err := ad.TranslateNonStream(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)
+		if err != nil {
+			return string(rawJSON)
+		}
+		return result
+	}
 	return defaultRegistry.TranslateNonStream(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)
 }
 

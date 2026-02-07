@@ -18,7 +18,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+const (
+	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+	DefaultPprofAddr             = "127.0.0.1:8316"
+)
 
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
@@ -41,6 +44,9 @@ type Config struct {
 	// Debug enables or disables debug-level logging and other debug features.
 	Debug bool `yaml:"debug" json:"debug"`
 
+	// Pprof config controls the optional pprof HTTP debug server.
+	Pprof PprofConfig `yaml:"pprof" json:"pprof"`
+
 	// CommercialMode disables high-overhead HTTP middleware features to minimize per-request memory usage.
 	CommercialMode bool `yaml:"commercial-mode" json:"commercial-mode"`
 
@@ -50,6 +56,10 @@ type Config struct {
 	// LogsMaxTotalSizeMB limits the total size (in MB) of log files under the logs directory.
 	// When exceeded, the oldest log files are deleted until within the limit. Set to 0 to disable.
 	LogsMaxTotalSizeMB int `yaml:"logs-max-total-size-mb" json:"logs-max-total-size-mb"`
+
+	// ErrorLogsMaxFiles limits the number of error log files retained when request logging is disabled.
+	// When exceeded, the oldest error log files are deleted. Default is 10. Set to 0 to disable cleanup.
+	ErrorLogsMaxFiles int `yaml:"error-logs-max-files" json:"error-logs-max-files"`
 
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
@@ -70,14 +80,6 @@ type Config struct {
 
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
-
-	// CodexInstructionsEnabled controls whether official Codex instructions are injected.
-	// When false (default), CodexInstructionsForModel returns immediately without modification.
-	// When true, the original instruction injection logic is used.
-	CodexInstructionsEnabled bool `yaml:"codex-instructions-enabled" json:"codex-instructions-enabled"`
-
-	// DisableAuth disables API key authentication for all endpoints (Ollama compatibility mode).
-	DisableAuth bool `yaml:"disable-auth" json:"disable-auth"`
 
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
@@ -136,6 +138,14 @@ type TLSConfig struct {
 	Cert string `yaml:"cert" json:"cert"`
 	// Key is the path to the TLS private key file.
 	Key string `yaml:"key" json:"key"`
+}
+
+// PprofConfig holds pprof HTTP server settings.
+type PprofConfig struct {
+	// Enable toggles the pprof HTTP debug server.
+	Enable bool `yaml:"enable" json:"enable"`
+	// Addr is the host:port address for the pprof HTTP server.
+	Addr string `yaml:"addr" json:"addr"`
 }
 
 // RemoteManagement holds management API configuration under 'remote-management'.
@@ -245,6 +255,16 @@ type PayloadConfig struct {
 	Override []PayloadRule `yaml:"override" json:"override"`
 	// OverrideRaw defines rules that always set raw JSON values, overwriting any existing values.
 	OverrideRaw []PayloadRule `yaml:"override-raw" json:"override-raw"`
+	// Filter defines rules that remove parameters from the payload by JSON path.
+	Filter []PayloadFilterRule `yaml:"filter" json:"filter"`
+}
+
+// PayloadFilterRule describes a rule to remove specific JSON paths from matching model payloads.
+type PayloadFilterRule struct {
+	// Models lists model entries with name pattern and protocol constraint.
+	Models []PayloadModelRule `yaml:"models" json:"models"`
+	// Params lists JSON paths (gjson/sjson syntax) to remove from the payload.
+	Params []string `yaml:"params" json:"params"`
 }
 
 // PayloadRule describes a single rule targeting a list of models with parameter updates.
@@ -547,8 +567,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Host = "" // Default empty: binds to all interfaces (IPv4 + IPv6)
 	cfg.LoggingToFile = false
 	cfg.LogsMaxTotalSizeMB = 0
+	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
 	cfg.DisableCooling = false
+	cfg.Pprof.Enable = false
+	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.IncognitoBrowser = false // Default to normal browser (AWS uses incognito by force)
@@ -593,8 +616,17 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	}
 
+	cfg.Pprof.Addr = strings.TrimSpace(cfg.Pprof.Addr)
+	if cfg.Pprof.Addr == "" {
+		cfg.Pprof.Addr = DefaultPprofAddr
+	}
+
 	if cfg.LogsMaxTotalSizeMB < 0 {
 		cfg.LogsMaxTotalSizeMB = 0
+	}
+
+	if cfg.ErrorLogsMaxFiles < 0 {
+		cfg.ErrorLogsMaxFiles = 10
 	}
 
 	// Sync request authentication providers with inline API keys for backwards compatibility.

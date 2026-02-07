@@ -80,15 +80,14 @@ func (e *KiloCodeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	to := sdktranslator.FromString("openai")
 
 	// Prepare original payload for payload config comparison
-	originalPayload := bytes.Clone(req.Payload)
+	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
-		originalPayload = bytes.Clone(opts.OriginalRequest)
+		originalPayloadSource = opts.OriginalRequest
 	}
+	originalPayload := originalPayloadSource
 
-	originalTranslated, body, err := sdktranslator.TranslateRequestPairE(ctx, from, to, baseModel, bytes.Clone(req.Payload), originalPayload, false)
-	if err != nil {
-		return resp, err
-	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
+	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
 	requestedModel := payloadRequestedModel(opts, baseModel)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
@@ -180,15 +179,14 @@ func (e *KiloCodeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 
-	originalPayload := bytes.Clone(req.Payload)
+	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
-		originalPayload = bytes.Clone(opts.OriginalRequest)
+		originalPayloadSource = opts.OriginalRequest
 	}
+	originalPayload := originalPayloadSource
 
-	originalTranslated, body, err := sdktranslator.TranslateRequestPairE(ctx, from, to, baseModel, bytes.Clone(req.Payload), originalPayload, true)
-	if err != nil {
-		return nil, err
-	}
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
+	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 
 	requestedModel := payloadRequestedModel(opts, baseModel)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
@@ -266,7 +264,7 @@ func (e *KiloCodeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 				reporter.publish(ctx, detail)
 			}
 
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, bytes.Clone(opts.OriginalRequest), body, bytes.Clone(trimmed), &param)
+			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, trimmed, &param)
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
 			}
