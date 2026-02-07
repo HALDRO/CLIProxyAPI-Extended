@@ -385,8 +385,16 @@ func buildUserMessageStruct(msg ir.Message, tools []ToolSpecification, modelID, 
 		}
 	}
 
-	if isCurrent && content == "" && len(toolResults) == 0 {
-		content = "Continue"
+	// CRITICAL: Kiro API requires content to be non-empty for ALL user messages.
+	// This includes both history messages and the current message.
+	// When user message contains only tool_result (no text), content will be empty.
+	// This commonly happens in compaction requests from OpenCode.
+	if strings.TrimSpace(content) == "" {
+		if len(toolResults) > 0 {
+			content = "Tool results provided."
+		} else {
+			content = "Continue"
+		}
 	}
 
 	uInput := &UserInputMessage{
@@ -433,11 +441,9 @@ func buildAssistantMessageStruct(msg ir.Message) *AssistantResponseMessage {
 	if content == "" {
 		// Kiro API requires non-empty assistant content.
 		// This happens in compaction/tool-only assistant turns.
-		if len(toolUses) > 0 {
-			content = "I'll help you with that."
-		} else {
-			content = "I understand."
-		}
+		// IMPORTANT: Use a minimal neutral string that the model won't mimic in responses.
+		// Previously "I'll help you with that." / "I understand." caused the model to parrot them back.
+		content = "."
 	}
 
 	return &AssistantResponseMessage{

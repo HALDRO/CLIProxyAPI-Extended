@@ -95,6 +95,12 @@ var kiroModelMapping = map[string]string{
 	"amazonq-claude-sonnet-4.5": "claude-sonnet-4.5",
 	"amazonq-claude-sonnet-4":   "claude-sonnet-4",
 	"amazonq-claude-haiku-4.5":  "claude-haiku-4.5",
+	// Kiro-prefixed aliases from registry/model list
+	"kiro-auto":              "auto",
+	"kiro-claude-opus-4-5":   "claude-opus-4.5",
+	"kiro-claude-sonnet-4-5": "claude-sonnet-4.5",
+	"kiro-claude-sonnet-4":   "claude-sonnet-4",
+	"kiro-claude-haiku-4-5":  "claude-haiku-4.5",
 }
 
 type KiroExecutorV2 struct {
@@ -331,8 +337,8 @@ type requestContext struct {
 	isAgentic    bool
 	sourceFormat string
 
-	apiRegion    string
-	useFallback  bool
+	apiRegion   string
+	useFallback bool
 }
 
 func (e *KiroExecutorV2) prepareRequest(ctx context.Context, auth *coreauth.Auth, req cliproxyexecutor.Request, sourceFormat string) (*requestContext, error) {

@@ -165,18 +165,24 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		var chatCompletionsTools []interface{}
 
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			// Built-in tools (e.g. {"type":"web_search"}) are already compatible with the Chat Completions schema.
-			// Only function tools need structural conversion because Chat Completions nests details under "function".
 			toolType := tool.Get("type").String()
-			if toolType != "" && toolType != "function" && tool.IsObject() {
-				// Almost all providers lack built-in tools, so we just ignore them.
-				// chatCompletionsTools = append(chatCompletionsTools, tool.Value())
+
+			// Custom tools (e.g. ApplyPatch with "type":"custom") must be preserved as-is.
+			// They use raw text input (not JSON parameters) and have a "format" field
+			// instead of "parameters". Pass them through without conversion.
+			if toolType == "custom" {
+				chatCompletionsTools = append(chatCompletionsTools, tool.Value())
 				return true
 			}
 
-			chatTool := `{"type":"function","function":{}}`
+			// Built-in tools (e.g. {"type":"web_search"}) — skip for legacy providers.
+			if toolType != "" && toolType != "function" && tool.IsObject() {
+				return true
+			}
 
-			// Convert tool structure from responses format to chat completions format
+			// Function tools need structural conversion: flat Responses API format
+			// to nested Chat Completions format (details under "function").
+			chatTool := `{"type":"function","function":{}}`
 			function := `{"name":"","description":"","parameters":{}}`
 
 			if name := tool.Get("name"); name.Exists() {

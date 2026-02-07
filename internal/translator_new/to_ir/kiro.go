@@ -120,13 +120,14 @@ func extractThinkingFromContent(content string) (string, string) {
 
 // KiroStreamState tracks state for Kiro streaming response parsing.
 type KiroStreamState struct {
-	Usage               *ir.Usage
-	CurrentTool         *ir.ToolCall
-	AccumulatedContent  string
-	CurrentToolInput    string
-	ToolCalls           []ir.ToolCall
-	InThinkingBlock     bool   // Whether we're currently inside a <thinking> block
-	AccumulatedThinking string // Accumulated thinking content
+	Usage                      *ir.Usage
+	CurrentTool                *ir.ToolCall
+	AccumulatedContent         string
+	CurrentToolInput           string
+	ToolCalls                  []ir.ToolCall
+	InThinkingBlock            bool    // Whether we're currently inside a <thinking> block
+	AccumulatedThinking        string  // Accumulated thinking content
+	UpstreamContextPercentage  float64 // Context usage percentage from contextUsageEvent (0.0 - 1.0)
 }
 
 // Kiro thinking tag constants
@@ -153,6 +154,7 @@ func (s *KiroStreamState) ProcessChunk(rawJSON []byte) ([]ir.UnifiedEvent, error
 	parsed := gjson.ParseBytes(rawJSON)
 
 	s.parseUsage(parsed)
+	s.parseContextUsage(parsed)
 
 	// Handle reasoningContentEvent (official Kiro thinking mode)
 	if reasoningEvents := s.processReasoningEvent(parsed); len(reasoningEvents) > 0 {
@@ -187,6 +189,21 @@ func (s *KiroStreamState) parseUsage(parsed gjson.Result) {
 			CompletionTokens: int(outTokens),
 			TotalTokens:      int(inTokens + outTokens),
 		}
+	}
+}
+
+// parseContextUsage extracts context usage percentage from contextUsageEvent.
+// Format: {"contextUsageEvent": {"contextUsagePercentage": 0.53}}
+func (s *KiroStreamState) parseContextUsage(parsed gjson.Result) {
+	if ctxUsage := parsed.Get("contextUsageEvent"); ctxUsage.Exists() {
+		if pct := ctxUsage.Get("contextUsagePercentage"); pct.Exists() {
+			s.UpstreamContextPercentage = pct.Float()
+			return
+		}
+	}
+	// Fallback: direct field
+	if pct := parsed.Get("contextUsagePercentage"); pct.Exists() {
+		s.UpstreamContextPercentage = pct.Float()
 	}
 }
 
