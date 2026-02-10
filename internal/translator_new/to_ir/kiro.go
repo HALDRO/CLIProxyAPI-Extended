@@ -120,14 +120,15 @@ func extractThinkingFromContent(content string) (string, string) {
 
 // KiroStreamState tracks state for Kiro streaming response parsing.
 type KiroStreamState struct {
-	Usage                      *ir.Usage
-	CurrentTool                *ir.ToolCall
-	AccumulatedContent         string
-	CurrentToolInput           string
-	ToolCalls                  []ir.ToolCall
-	InThinkingBlock            bool    // Whether we're currently inside a <thinking> block
-	AccumulatedThinking        string  // Accumulated thinking content
-	UpstreamContextPercentage  float64 // Context usage percentage from contextUsageEvent (0.0 - 1.0)
+	Usage                     *ir.Usage
+	CurrentTool               *ir.ToolCall
+	AccumulatedContent        string
+	CurrentToolInput          string
+	ToolCalls                 []ir.ToolCall
+	InThinkingBlock           bool    // Whether we're currently inside a <thinking> block
+	AccumulatedThinking       string  // Accumulated thinking content
+	UpstreamContextPercentage float64 // Context usage percentage from contextUsageEvent (0.0 - 1.0)
+	ContextWindowTokens       int     // Model context window used to convert context percentage to prompt tokens
 }
 
 // Kiro thinking tag constants
@@ -136,10 +137,20 @@ const (
 	kiroThinkingEndTag   = "</thinking>"
 )
 
+const defaultKiroContextWindowTokens = 200000
+
 func NewKiroStreamState() *KiroStreamState {
 	return &KiroStreamState{
-		ToolCalls:       make([]ir.ToolCall, 0),
-		InThinkingBlock: false,
+		ToolCalls:           make([]ir.ToolCall, 0),
+		InThinkingBlock:     false,
+		ContextWindowTokens: defaultKiroContextWindowTokens,
+	}
+}
+
+// SetContextWindowTokens sets the model context window for context usage conversion.
+func (s *KiroStreamState) SetContextWindowTokens(tokens int) {
+	if tokens > 0 {
+		s.ContextWindowTokens = tokens
 	}
 }
 
@@ -177,6 +188,19 @@ func (s *KiroStreamState) parseUsage(parsed gjson.Result) {
 	}
 
 	if !usageNode.Exists() {
+		// Also support metadata event format used by Kiro stream
+		if mm := parsed.Get("messageMetadataEvent.tokenUsage"); mm.Exists() {
+			inTokens := mm.Get("uncachedInputTokens").Int() + mm.Get("cacheReadInputTokens").Int()
+			outTokens := mm.Get("outputTokens").Int()
+			if inTokens > 0 || outTokens > 0 {
+				s.Usage = &ir.Usage{
+					PromptTokens:     int(inTokens),
+					CompletionTokens: int(outTokens),
+					TotalTokens:      int(inTokens + outTokens),
+				}
+			}
+			return
+		}
 		return
 	}
 
@@ -193,17 +217,53 @@ func (s *KiroStreamState) parseUsage(parsed gjson.Result) {
 }
 
 // parseContextUsage extracts context usage percentage from contextUsageEvent.
-// Format: {"contextUsageEvent": {"contextUsagePercentage": 0.53}}
+// Supports both ratio [0..1] and percent [0..100] formats.
 func (s *KiroStreamState) parseContextUsage(parsed gjson.Result) {
+	found := false
 	if ctxUsage := parsed.Get("contextUsageEvent"); ctxUsage.Exists() {
 		if pct := ctxUsage.Get("contextUsagePercentage"); pct.Exists() {
 			s.UpstreamContextPercentage = pct.Float()
-			return
+			found = true
 		}
 	}
-	// Fallback: direct field
-	if pct := parsed.Get("contextUsagePercentage"); pct.Exists() {
-		s.UpstreamContextPercentage = pct.Float()
+	if !found {
+		if pct := parsed.Get("contextUsagePercentage"); pct.Exists() {
+			s.UpstreamContextPercentage = pct.Float()
+			found = true
+		}
+	}
+	if !found {
+		if pct := parsed.Get("messageMetadataEvent.tokenUsage.contextUsagePercentage"); pct.Exists() {
+			s.UpstreamContextPercentage = pct.Float()
+			found = true
+		}
+	}
+	if !found || s.UpstreamContextPercentage <= 0 {
+		return
+	}
+
+	// Kiro sends either 0.53 (ratio) or 53.0 (percent).
+	pct := s.UpstreamContextPercentage
+	if pct <= 1.0 {
+		pct = pct * 100.0
+	}
+	if pct > 100.0 {
+		pct = 100.0
+	}
+
+	if s.Usage == nil {
+		s.Usage = &ir.Usage{}
+	}
+
+	// Assume model context window for Kiro and prefer upstream context signal.
+	base := s.ContextWindowTokens
+	if base <= 0 {
+		base = defaultKiroContextWindowTokens
+	}
+	calculated := int(pct * float64(base) / 100.0)
+	if calculated > s.Usage.PromptTokens {
+		s.Usage.PromptTokens = calculated
+		s.Usage.TotalTokens = s.Usage.PromptTokens + s.Usage.CompletionTokens
 	}
 }
 

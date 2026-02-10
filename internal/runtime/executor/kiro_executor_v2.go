@@ -25,6 +25,7 @@ import (
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/from_ir"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/to_ir"
@@ -579,7 +580,10 @@ func (e *KiroExecutorV2) handleEventStreamResponse(body io.ReadCloser, model str
 	scanner.Buffer(nil, 52_428_800) // 50MB buffer to handle large AWS EventStream frames
 	scanner.Split(splitAWSEventStream)
 	state := to_ir.NewKiroStreamState()
-
+	// Use model registry context length when available (fallback remains 200k)
+	if info := registry.LookupModelInfo("kiro-"+strings.ReplaceAll(model, ".", "-"), "kiro"); info != nil && info.ContextLength > 0 {
+		state.SetContextWindowTokens(info.ContextLength)
+	}
 	for scanner.Scan() {
 		payload, err := parseEventPayload(scanner.Bytes())
 		if err == nil {
@@ -748,6 +752,10 @@ func (e *KiroExecutorV2) processStream(resp *http.Response, model string, reques
 	scanner.Buffer(nil, 52_428_800) // 50MB buffer to handle large AWS EventStream frames
 	scanner.Split(splitAWSEventStream)
 	state := to_ir.NewKiroStreamState()
+	// Use model registry context length when available (fallback remains 200k)
+	if info := registry.LookupModelInfo("kiro-"+strings.ReplaceAll(model, ".", "-"), "kiro"); info != nil && info.ContextLength > 0 {
+		state.SetContextWindowTokens(info.ContextLength)
+	}
 	messageID := "chatcmpl-" + uuid.New().String()
 	idx := 0
 
