@@ -119,7 +119,7 @@ func (p *KiroProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, error
 	if injectWebSearchHint {
 		tools = filterNetworkingTools(tools)
 	}
-	
+
 	systemPrompt := extractSystemPrompt(req.Messages)
 	if injectWebSearchHint {
 		systemPrompt = injectWebSearchAlternativeHint(systemPrompt)
@@ -232,7 +232,7 @@ func extractToolsStruct(irTools []ir.ToolDefinition) []ToolSpecification {
 		// This handles $ref resolution, allOf merging, and removes unsupported keywords
 		cleanedSchema := ir.CleanJsonSchemaEnhanced(ir.CopyMap(t.Parameters))
 		finalSchema := ensureKiroInputSchema(cleanedSchema)
-		
+
 		tools[i] = ToolSpecification{
 			ToolSpecification: ToolSpecDetails{
 				Name:        shortenToolNameIfNeeded(t.Name),
@@ -291,9 +291,102 @@ const kiroMaxHistoryMessages = 50
 
 func truncateHistoryIfNeeded(history []HistoryMessage) []HistoryMessage {
 	if len(history) <= kiroMaxHistoryMessages {
+		return sanitizeHistoryToolReferences(history)
+	}
+	truncated := history[len(history)-kiroMaxHistoryMessages:]
+	return sanitizeHistoryToolReferences(truncated)
+}
+
+func sanitizeHistoryToolReferences(history []HistoryMessage) []HistoryMessage {
+	if len(history) == 0 {
 		return history
 	}
-	return history[len(history)-kiroMaxHistoryMessages:]
+
+	validToolUseIDs := collectHistoryToolUseIDs(history)
+	for i := range history {
+		if history[i].UserInputMessage == nil || history[i].UserInputMessage.UserInputMessageContext == nil {
+			continue
+		}
+
+		ctx := history[i].UserInputMessage.UserInputMessageContext
+		if len(ctx.ToolResults) == 0 {
+			continue
+		}
+
+		filtered := filterToolResultsByKnownToolUseIDs(ctx.ToolResults, validToolUseIDs)
+		if len(filtered) == 0 {
+			ctx.ToolResults = nil
+			if len(ctx.Tools) == 0 {
+				history[i].UserInputMessage.UserInputMessageContext = nil
+			}
+			continue
+		}
+		ctx.ToolResults = filtered
+	}
+
+	return history
+}
+
+func sanitizeCurrentToolResults(currentMsg *CurrentMessage, history []HistoryMessage) {
+	if currentMsg == nil || currentMsg.UserInputMessage.UserInputMessageContext == nil {
+		return
+	}
+
+	ctx := currentMsg.UserInputMessage.UserInputMessageContext
+	if len(ctx.ToolResults) == 0 {
+		return
+	}
+
+	validToolUseIDs := collectHistoryToolUseIDs(history)
+	filtered := filterToolResultsByKnownToolUseIDs(ctx.ToolResults, validToolUseIDs)
+	if len(filtered) == 0 {
+		ctx.ToolResults = nil
+		if len(ctx.Tools) == 0 {
+			currentMsg.UserInputMessage.UserInputMessageContext = nil
+		}
+		return
+	}
+	ctx.ToolResults = filtered
+}
+
+func collectHistoryToolUseIDs(history []HistoryMessage) map[string]struct{} {
+	ids := make(map[string]struct{})
+	for _, msg := range history {
+		if msg.AssistantResponseMessage == nil || len(msg.AssistantResponseMessage.ToolUses) == 0 {
+			continue
+		}
+		for _, tu := range msg.AssistantResponseMessage.ToolUses {
+			id := strings.TrimSpace(tu.ToolUseId)
+			if id != "" {
+				ids[id] = struct{}{}
+			}
+		}
+	}
+	return ids
+}
+
+func filterToolResultsByKnownToolUseIDs(toolResults []ToolResult, validToolUseIDs map[string]struct{}) []ToolResult {
+	if len(toolResults) == 0 {
+		return toolResults
+	}
+
+	filtered := make([]ToolResult, 0, len(toolResults))
+	seen := make(map[string]struct{}, len(toolResults))
+	for _, tr := range toolResults {
+		id := strings.TrimSpace(tr.ToolUseId)
+		if id == "" {
+			continue
+		}
+		if _, ok := validToolUseIDs[id]; !ok {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		filtered = append(filtered, tr)
+	}
+	return filtered
 }
 
 func processMessagesStruct(messages []ir.Message, tools []ToolSpecification, modelID, origin string) ([]HistoryMessage, CurrentMessage) {
@@ -348,7 +441,9 @@ func processMessagesStruct(messages []ir.Message, tools []ToolSpecification, mod
 		}
 	}
 
-	return history, CurrentMessage{UserInputMessage: currentMsg}
+	wrappedCurrent := CurrentMessage{UserInputMessage: currentMsg}
+	sanitizeCurrentToolResults(&wrappedCurrent, history)
+	return history, wrappedCurrent
 }
 
 func buildHistoryStruct(messages []ir.Message, tools []ToolSpecification, modelID, origin string) []HistoryMessage {
