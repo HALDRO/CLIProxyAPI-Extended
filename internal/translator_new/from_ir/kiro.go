@@ -364,6 +364,18 @@ func processMessagesStruct(messages []ir.Message, tools []ToolSpecification, mod
 	nonSystem = removePrefill(nonSystem)
 	nonSystem = alternateRoles(nonSystem)
 
+	// FIX: Kiro API requires history to start with a user message.
+	// Some clients (e.g., OpenClaw) send conversations starting with an assistant message,
+	// which causes "Improperly formed request" on Kiro.
+	// Prepend a placeholder user message so the history alternation is correct.
+	if len(nonSystem) > 0 && nonSystem[0].Role == ir.RoleAssistant {
+		placeholder := ir.Message{
+			Role:    ir.RoleUser,
+			Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "."}},
+		}
+		nonSystem = append([]ir.Message{placeholder}, nonSystem...)
+	}
+
 	if len(nonSystem) == 0 {
 		// Fallback for empty conversation
 		return []HistoryMessage{}, CurrentMessage{
@@ -656,6 +668,12 @@ func mergeConsecutiveMessages(messages []ir.Message) []ir.Message {
 			last := &merged[len(merged)-1]
 			if last.Role == msg.Role && msg.Role != ir.RoleUser {
 				last.Content = append(last.Content, msg.Content...)
+				// Preserve tool_calls when merging adjacent assistant messages.
+				// Without this, tool_calls from the second message are lost,
+				// causing orphaned tool_result references downstream.
+				if msg.Role == ir.RoleAssistant && len(msg.ToolCalls) > 0 {
+					last.ToolCalls = append(last.ToolCalls, msg.ToolCalls...)
+				}
 				continue
 			}
 		}
