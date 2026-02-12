@@ -13,26 +13,28 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	kiroclaude "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/from_ir"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/to_ir"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -49,6 +51,15 @@ const (
 	kiroRefreshSkew    = 5 * time.Minute
 	kiroRequestTimeout = 120 * time.Second
 	kiroMaxRetries     = 2
+
+	// Socket retry configuration constants
+	kiroSocketMaxRetriesV2    = 3
+	kiroSocketBaseRetryDelayV2 = 1 * time.Second
+	kiroSocketMaxRetryDelayV2  = 30 * time.Second
+
+	// User-Agent strings (CLI style for non-IDC auth)
+	kiroUserAgentV2     = "aws-sdk-rust/1.3.9 os/macos lang/rust/1.87.0"
+	kiroFullUserAgentV2 = "aws-sdk-rust/1.3.9 ua/2.1 api/ssooidc/1.88.0 os/macos lang/rust/1.87.0 m/E app/AmazonQ-For-CLI"
 
 	// Kiro API headers
 	// Q endpoint uses plain JSON.
@@ -132,6 +143,176 @@ var kiroModelMapping = map[string]string{
 	"kiro-claude-sonnet-4-5-agentic": "claude-sonnet-4.5",
 	"kiro-claude-sonnet-4-agentic":   "claude-sonnet-4",
 	"kiro-claude-haiku-4-5-agentic":  "claude-haiku-4.5",
+}
+
+// retryableHTTPStatusCodesV2 defines HTTP status codes that are retryable (500, 502, 503, 504).
+var retryableHTTPStatusCodesV2 = map[int]bool{
+	500: true,
+	502: true,
+	503: true,
+	504: true,
+}
+
+// Global FingerprintManager for dynamic User-Agent generation per token
+var (
+	globalFingerprintManagerV2     *kiroauth.FingerprintManager
+	globalFingerprintManagerOnceV2 sync.Once
+)
+
+func getGlobalFingerprintManagerV2() *kiroauth.FingerprintManager {
+	globalFingerprintManagerOnceV2.Do(func() {
+		globalFingerprintManagerV2 = kiroauth.NewFingerprintManager()
+		log.Infof("kiro-v2: initialized global FingerprintManager for dynamic UA generation")
+	})
+	return globalFingerprintManagerV2
+}
+
+// Global pooled HTTP client for connection reuse
+var (
+	kiroHTTPClientPoolV2     *http.Client
+	kiroHTTPClientPoolOnceV2 sync.Once
+)
+
+func getKiroPooledHTTPClientV2() *http.Client {
+	kiroHTTPClientPoolOnceV2.Do(func() {
+		transport := &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 20,
+			MaxConnsPerHost:     50,
+			IdleConnTimeout:     90 * time.Second,
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			ForceAttemptHTTP2:     true,
+		}
+		kiroHTTPClientPoolV2 = &http.Client{Transport: transport}
+		log.Debugf("kiro-v2: initialized pooled HTTP client (MaxIdleConns=100, MaxConnsPerHost=50)")
+	})
+	return kiroHTTPClientPoolV2
+}
+
+// newPooledHTTPClientV2 returns a pooled client, or a proxy-aware client if proxy is configured.
+func newPooledHTTPClientV2(ctx context.Context, cfg *config.Config, auth *coreauth.Auth, timeout time.Duration) *http.Client {
+	var proxyURL string
+	if auth != nil {
+		proxyURL = strings.TrimSpace(auth.ProxyURL)
+	}
+	if proxyURL == "" && cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+	}
+	if proxyURL != "" {
+		return newProxyAwareHTTPClient(ctx, cfg, auth, timeout)
+	}
+	pooled := getKiroPooledHTTPClientV2()
+	if timeout > 0 {
+		return &http.Client{Transport: pooled.Transport, Timeout: timeout}
+	}
+	return pooled
+}
+
+// retryConfigV2 holds retry configuration for V2 executor.
+type retryConfigV2 struct {
+	MaxRetries      int
+	BaseDelay       time.Duration
+	MaxDelay        time.Duration
+	RetryableErrors []string
+}
+
+func defaultRetryConfigV2() retryConfigV2 {
+	return retryConfigV2{
+		MaxRetries: kiroSocketMaxRetriesV2,
+		BaseDelay:  kiroSocketBaseRetryDelayV2,
+		MaxDelay:   kiroSocketMaxRetryDelayV2,
+		RetryableErrors: []string{
+			"connection reset", "connection refused", "broken pipe",
+			"EOF", "timeout", "temporary failure", "no such host",
+			"network is unreachable", "i/o timeout",
+		},
+	}
+}
+
+// isRetryableErrorV2 checks if an error is retryable (network errors, timeouts, etc.).
+func isRetryableErrorV2(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	var syscallErr syscall.Errno
+	if errors.As(err, &syscallErr) {
+		switch syscallErr {
+		case syscall.ECONNRESET, syscall.ECONNREFUSED, syscall.EPIPE,
+			syscall.ETIMEDOUT, syscall.ENETUNREACH, syscall.EHOSTUNREACH:
+			return true
+		}
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		if opErr.Err != nil {
+			return isRetryableErrorV2(opErr.Err)
+		}
+		return true
+	}
+	errMsg := strings.ToLower(err.Error())
+	for _, pattern := range defaultRetryConfigV2().RetryableErrors {
+		if strings.Contains(errMsg, pattern) {
+			return true
+		}
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	return false
+}
+
+func calculateRetryDelayV2(attempt int) time.Duration {
+	cfg := defaultRetryConfigV2()
+	return kiroauth.ExponentialBackoffWithJitter(attempt, cfg.BaseDelay, cfg.MaxDelay)
+}
+
+// getTokenKeyV2 returns a unique key for rate limiting based on auth credentials.
+func getTokenKeyV2(auth *coreauth.Auth) string {
+	if auth != nil && auth.ID != "" {
+		return auth.ID
+	}
+	token := getMetaString(auth.Metadata, "access_token", "accessToken")
+	if len(token) > 16 {
+		return token[:16]
+	}
+	return token
+}
+
+// isIDCAuthV2 checks if the auth uses IDC (Identity Center) authentication.
+func isIDCAuthV2(auth *coreauth.Auth) bool {
+	if auth == nil || auth.Metadata == nil {
+		return false
+	}
+	authMethod, _ := auth.Metadata["auth_method"].(string)
+	return strings.ToLower(authMethod) == "idc"
+}
+
+// applyDynamicFingerprintV2 applies token-specific fingerprint headers to the request.
+// IDC auth gets dynamic UA, others get static Amazon Q CLI style headers.
+func applyDynamicFingerprintV2(req *http.Request, auth *coreauth.Auth) {
+	if isIDCAuthV2(auth) {
+		tokenKey := getTokenKeyV2(auth)
+		fp := getGlobalFingerprintManagerV2().GetFingerprint(tokenKey)
+		req.Header.Set("User-Agent", fp.BuildUserAgent())
+		req.Header.Set("X-Amz-User-Agent", fp.BuildAmzUserAgent())
+		log.Debugf("kiro-v2: dynamic fingerprint for token %s...", tokenKey[:min(8, len(tokenKey))])
+	} else {
+		req.Header.Set("User-Agent", kiroUserAgentV2)
+		req.Header.Set("X-Amz-User-Agent", kiroFullUserAgentV2)
+	}
 }
 
 type KiroExecutorV2 struct {
@@ -360,6 +541,7 @@ type requestContext struct {
 	auth         *coreauth.Auth
 	req          cliproxyexecutor.Request
 	token        string
+	tokenKey     string
 	kiroModelID  string
 	requestID    string
 	irReq        *ir.UnifiedChatRequest
@@ -393,6 +575,7 @@ func (e *KiroExecutorV2) prepareRequest(ctx context.Context, auth *coreauth.Auth
 	}
 
 	rc.kiroModelID = mapModelID(req.Model)
+	rc.tokenKey = getTokenKeyV2(rc.auth)
 
 	// Parse request based on source format
 	sanitizedPayload := []byte(ir.SanitizeText(string(req.Payload)))
@@ -485,6 +668,9 @@ func (e *KiroExecutorV2) buildHTTPRequest(rc *requestContext) (*http.Request, er
 	httpReq.Header.Set("x-amzn-kiro-agent-mode", kiroAgentModeHeaderV2)
 	httpReq.Header.Set("x-amzn-codewhisperer-optout", "true")
 
+	// Apply dynamic fingerprint (IDC gets dynamic UA, others get static)
+	applyDynamicFingerprintV2(httpReq, rc.auth)
+
 	if rc.token != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+rc.token)
 	}
@@ -492,10 +678,27 @@ func (e *KiroExecutorV2) buildHTTPRequest(rc *requestContext) (*http.Request, er
 }
 
 func (e *KiroExecutorV2) Execute(ctx context.Context, auth *coreauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	// Check for pure web_search request — route to MCP endpoint
+	if kiroclaude.HasWebSearchTool(req.Payload) {
+		log.Infof("kiro-v2: detected pure web_search request (non-stream), routing to MCP endpoint")
+		return e.handleWebSearchV2(ctx, auth, req, opts)
+	}
+
 	rc, err := e.prepareRequest(ctx, auth, req, opts.SourceFormat.String())
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
+
+	// Rate limiting & cooldown pre-check
+	rateLimiter := kiroauth.GetGlobalRateLimiter()
+	cooldownMgr := kiroauth.GetGlobalCooldownManager()
+	if cooldownMgr.IsInCooldown(rc.tokenKey) {
+		remaining := cooldownMgr.GetRemainingCooldown(rc.tokenKey)
+		reason := cooldownMgr.GetCooldownReason(rc.tokenKey)
+		log.Warnf("kiro-v2: token %s in cooldown (reason: %s), remaining: %v", rc.tokenKey, reason, remaining)
+		return cliproxyexecutor.Response{}, fmt.Errorf("kiro: token is in cooldown for %v (reason: %s)", remaining, reason)
+	}
+	rateLimiter.WaitForToken(rc.tokenKey)
 
 	return e.executeWithRetry(rc)
 }
@@ -503,10 +706,13 @@ func (e *KiroExecutorV2) Execute(ctx context.Context, auth *coreauth.Auth, req c
 func (e *KiroExecutorV2) executeWithRetry(rc *requestContext) (cliproxyexecutor.Response, error) {
 	var lastErr error
 	currentOrigin := rc.origin
-	initialOrigin := rc.origin // Store initial origin for comparison
+	initialOrigin := rc.origin
 	useFallbackURL := false
+	rateLimiter := kiroauth.GetGlobalRateLimiter()
+	cooldownMgr := kiroauth.GetGlobalCooldownManager()
+	maxAttempts := kiroMaxRetries + kiroSocketMaxRetriesV2 // Combined retry budget
 
-	for attempt := 0; attempt <= kiroMaxRetries; attempt++ {
+	for attempt := 0; attempt <= maxAttempts; attempt++ {
 		// Update origin in request body if changed from initial
 		if currentOrigin != initialOrigin {
 			rc.irReq.Metadata["origin"] = currentOrigin
@@ -515,7 +721,7 @@ func (e *KiroExecutorV2) executeWithRetry(rc *requestContext) (cliproxyexecutor.
 			if err != nil {
 				return cliproxyexecutor.Response{}, err
 			}
-			initialOrigin = currentOrigin // Update so we don't rebuild unnecessarily
+			initialOrigin = currentOrigin
 		}
 
 		rc.useFallback = useFallbackURL
@@ -524,34 +730,37 @@ func (e *KiroExecutorV2) executeWithRetry(rc *requestContext) (cliproxyexecutor.
 			return cliproxyexecutor.Response{}, err
 		}
 
-		client := &http.Client{Timeout: kiroRequestTimeout}
-		if proxy := e.cfg.ProxyURL; proxy != "" {
-			util.SetProxy(&sdkconfig.SDKConfig{ProxyURL: proxy}, client)
-		} else if rc.auth.ProxyURL != "" {
-			util.SetProxy(&sdkconfig.SDKConfig{ProxyURL: rc.auth.ProxyURL}, client)
-		}
-
+		client := newPooledHTTPClientV2(rc.ctx, e.cfg, rc.auth, kiroRequestTimeout)
 		resp, err := client.Do(httpReq)
 		if err != nil {
-			// Try fallback URL on connection error
-			if !useFallbackURL {
-				log.Warnf("kiro: primary endpoint failed, trying fallback: %v", err)
-				useFallbackURL = true
+			if isRetryableErrorV2(err) && attempt < maxAttempts {
+				if !useFallbackURL {
+					log.Warnf("kiro-v2: primary endpoint failed (retryable), trying fallback: %v", err)
+					useFallbackURL = true
+				} else {
+					delay := calculateRetryDelayV2(attempt)
+					log.Warnf("kiro-v2: network error (attempt %d/%d), retrying in %v: %v", attempt+1, maxAttempts, delay, err)
+					time.Sleep(delay)
+				}
+				lastErr = err
 				continue
 			}
 			return cliproxyexecutor.Response{}, err
 		}
 
-		// Handle 429 (quota exhausted) - switch origin
+		// Handle 429 (quota exhausted) - switch origin or enter cooldown
 		if resp.StatusCode == http.StatusTooManyRequests {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			rateLimiter.MarkTokenFailed(rc.tokenKey)
 
 			if currentOrigin == "CLI" {
-				log.Warnf("kiro: CLI quota exhausted (429), switching to AI_EDITOR")
+				log.Warnf("kiro-v2: CLI quota exhausted (429), switching to AI_EDITOR")
 				currentOrigin = "AI_EDITOR"
 				continue
 			}
+			// Both origins exhausted — enter cooldown
+			cooldownMgr.SetCooldown(rc.tokenKey, 60*time.Second, "quota_exhausted_429")
 			lastErr = fmt.Errorf("quota exhausted: %s", string(body))
 			continue
 		}
@@ -561,38 +770,55 @@ func (e *KiroExecutorV2) executeWithRetry(rc *requestContext) (cliproxyexecutor.
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 
-			if attempt < kiroMaxRetries {
-				log.Warnf("kiro: auth error %d, refreshing token (attempt %d/%d)", resp.StatusCode, attempt+1, kiroMaxRetries)
+			// Detect suspended/disabled account
+			bodyStr := strings.ToLower(string(body))
+			if strings.Contains(bodyStr, "suspended") || strings.Contains(bodyStr, "disabled") {
+				cooldownMgr.SetCooldown(rc.tokenKey, 5*time.Minute, "account_suspended")
+				return cliproxyexecutor.Response{}, fmt.Errorf("account suspended/disabled: %s", string(body))
+			}
+
+			if attempt < maxAttempts {
+				log.Warnf("kiro-v2: auth error %d, refreshing token (attempt %d/%d)", resp.StatusCode, attempt+1, maxAttempts)
 				refreshedAuth, refreshErr := e.Refresh(rc.ctx, rc.auth)
 				if refreshErr != nil {
 					lastErr = fmt.Errorf("token refresh failed: %w", refreshErr)
 					continue
 				}
-
-				// Try to persist the refreshed token
 				if saver, ok := refreshedAuth.Storage.(interface{ Save() error }); ok {
 					if err := saver.Save(); err != nil {
-						log.Warnf("kiro: failed to persist refreshed auth: %v", err)
+						log.Warnf("kiro-v2: failed to persist refreshed auth: %v", err)
 					}
 				}
-
 				rc.auth = refreshedAuth
 				rc.token = getMetaString(refreshedAuth.Metadata, "access_token", "accessToken")
+				rc.tokenKey = getTokenKeyV2(refreshedAuth)
 				continue
 			}
 			return cliproxyexecutor.Response{}, fmt.Errorf("auth error %d: %s", resp.StatusCode, string(body))
 		}
 
+		// Handle 5xx - retryable server errors
+		if retryableHTTPStatusCodesV2[resp.StatusCode] && attempt < maxAttempts {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			delay := calculateRetryDelayV2(attempt)
+			log.Warnf("kiro-v2: server error %d (attempt %d/%d), retrying in %v: %s", resp.StatusCode, attempt+1, maxAttempts, delay, string(body))
+			lastErr = fmt.Errorf("server error %d: %s", resp.StatusCode, string(body))
+			time.Sleep(delay)
+			continue
+		}
+
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			// Log detailed error for debugging (Kiro returns useful details in JSON)
-			log.Warnf("kiro: upstream error %d for model %s: %s", resp.StatusCode, rc.req.Model, string(body))
+			log.Warnf("kiro-v2: upstream error %d for model %s: %s", resp.StatusCode, rc.req.Model, string(body))
 			return cliproxyexecutor.Response{}, fmt.Errorf("upstream error %d: %s", resp.StatusCode, string(body))
 		}
 
-		defer resp.Body.Close()
+		// Success — mark token as successful
+		rateLimiter.MarkTokenSuccess(rc.tokenKey)
 
+		defer resp.Body.Close()
 		if strings.HasPrefix(resp.Header.Get("Content-Type"), "application/vnd.amazon.eventstream") {
 			return e.handleEventStreamResponse(resp.Body, rc.req.Model, rc.sourceFormat)
 		}
@@ -665,10 +891,27 @@ func (e *KiroExecutorV2) convertToSourceFormat(messages []ir.Message, usage *ir.
 }
 
 func (e *KiroExecutorV2) ExecuteStream(ctx context.Context, auth *coreauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (<-chan cliproxyexecutor.StreamChunk, error) {
+	// Check for pure web_search request — route to MCP endpoint
+	if kiroclaude.HasWebSearchTool(req.Payload) {
+		log.Infof("kiro-v2: detected pure web_search request, routing to MCP endpoint")
+		return e.handleWebSearchStreamV2(ctx, auth, req, opts)
+	}
+
 	rc, err := e.prepareRequest(ctx, auth, req, opts.SourceFormat.String())
 	if err != nil {
 		return nil, err
 	}
+
+	// Rate limiting & cooldown pre-check
+	rateLimiter := kiroauth.GetGlobalRateLimiter()
+	cooldownMgr := kiroauth.GetGlobalCooldownManager()
+	if cooldownMgr.IsInCooldown(rc.tokenKey) {
+		remaining := cooldownMgr.GetRemainingCooldown(rc.tokenKey)
+		reason := cooldownMgr.GetCooldownReason(rc.tokenKey)
+		log.Warnf("kiro-v2: token %s in cooldown (reason: %s), remaining: %v", rc.tokenKey, reason, remaining)
+		return nil, fmt.Errorf("kiro: token is in cooldown for %v (reason: %s)", remaining, reason)
+	}
+	rateLimiter.WaitForToken(rc.tokenKey)
 
 	return e.executeStreamWithRetry(rc)
 }
@@ -676,10 +919,13 @@ func (e *KiroExecutorV2) ExecuteStream(ctx context.Context, auth *coreauth.Auth,
 func (e *KiroExecutorV2) executeStreamWithRetry(rc *requestContext) (<-chan cliproxyexecutor.StreamChunk, error) {
 	var lastErr error
 	currentOrigin := rc.origin
-	initialOrigin := rc.origin // Store initial origin for comparison
+	initialOrigin := rc.origin
 	useFallbackURL := false
+	rateLimiter := kiroauth.GetGlobalRateLimiter()
+	cooldownMgr := kiroauth.GetGlobalCooldownManager()
+	maxAttempts := kiroMaxRetries + kiroSocketMaxRetriesV2
 
-	for attempt := 0; attempt <= kiroMaxRetries; attempt++ {
+	for attempt := 0; attempt <= maxAttempts; attempt++ {
 		// Update origin in request body if changed from initial
 		if currentOrigin != initialOrigin {
 			rc.irReq.Metadata["origin"] = currentOrigin
@@ -688,7 +934,7 @@ func (e *KiroExecutorV2) executeStreamWithRetry(rc *requestContext) (<-chan clip
 			if err != nil {
 				return nil, err
 			}
-			initialOrigin = currentOrigin // Update so we don't rebuild unnecessarily
+			initialOrigin = currentOrigin
 		}
 
 		rc.useFallback = useFallbackURL
@@ -698,18 +944,19 @@ func (e *KiroExecutorV2) executeStreamWithRetry(rc *requestContext) (<-chan clip
 		}
 		httpReq.Header.Set("Connection", "keep-alive")
 
-		client := &http.Client{}
-		if proxy := e.cfg.ProxyURL; proxy != "" {
-			util.SetProxy(&sdkconfig.SDKConfig{ProxyURL: proxy}, client)
-		} else if rc.auth.ProxyURL != "" {
-			util.SetProxy(&sdkconfig.SDKConfig{ProxyURL: rc.auth.ProxyURL}, client)
-		}
-
+		client := newPooledHTTPClientV2(rc.ctx, e.cfg, rc.auth, 0)
 		resp, err := client.Do(httpReq)
 		if err != nil {
-			if !useFallbackURL {
-				log.Warnf("kiro: stream primary endpoint failed, trying fallback: %v", err)
-				useFallbackURL = true
+			if isRetryableErrorV2(err) && attempt < maxAttempts {
+				if !useFallbackURL {
+					log.Warnf("kiro-v2: stream primary endpoint failed (retryable), trying fallback: %v", err)
+					useFallbackURL = true
+				} else {
+					delay := calculateRetryDelayV2(attempt)
+					log.Warnf("kiro-v2: stream network error (attempt %d/%d), retrying in %v: %v", attempt+1, maxAttempts, delay, err)
+					time.Sleep(delay)
+				}
+				lastErr = err
 				continue
 			}
 			return nil, err
@@ -719,12 +966,14 @@ func (e *KiroExecutorV2) executeStreamWithRetry(rc *requestContext) (<-chan clip
 		if resp.StatusCode == http.StatusTooManyRequests {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			rateLimiter.MarkTokenFailed(rc.tokenKey)
 
 			if currentOrigin == "CLI" {
-				log.Warnf("kiro: stream CLI quota exhausted (429), switching to AI_EDITOR")
+				log.Warnf("kiro-v2: stream CLI quota exhausted (429), switching to AI_EDITOR")
 				currentOrigin = "AI_EDITOR"
 				continue
 			}
+			cooldownMgr.SetCooldown(rc.tokenKey, 60*time.Second, "quota_exhausted_429")
 			lastErr = fmt.Errorf("quota exhausted: %s", string(body))
 			continue
 		}
@@ -734,34 +983,52 @@ func (e *KiroExecutorV2) executeStreamWithRetry(rc *requestContext) (<-chan clip
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 
-			if attempt < kiroMaxRetries {
-				log.Warnf("kiro: stream auth error %d, refreshing token", resp.StatusCode)
+			bodyStr := strings.ToLower(string(body))
+			if strings.Contains(bodyStr, "suspended") || strings.Contains(bodyStr, "disabled") {
+				cooldownMgr.SetCooldown(rc.tokenKey, 5*time.Minute, "account_suspended")
+				return nil, fmt.Errorf("account suspended/disabled: %s", string(body))
+			}
+
+			if attempt < maxAttempts {
+				log.Warnf("kiro-v2: stream auth error %d, refreshing token", resp.StatusCode)
 				refreshedAuth, refreshErr := e.Refresh(rc.ctx, rc.auth)
 				if refreshErr != nil {
 					lastErr = fmt.Errorf("token refresh failed: %w", refreshErr)
 					continue
 				}
-
-				// Try to persist the refreshed token
 				if saver, ok := refreshedAuth.Storage.(interface{ Save() error }); ok {
 					if err := saver.Save(); err != nil {
-						log.Warnf("kiro: failed to persist refreshed auth: %v", err)
+						log.Warnf("kiro-v2: failed to persist refreshed auth: %v", err)
 					}
 				}
-
 				rc.auth = refreshedAuth
 				rc.token = getMetaString(refreshedAuth.Metadata, "access_token", "accessToken")
+				rc.tokenKey = getTokenKeyV2(refreshedAuth)
 				continue
 			}
 			return nil, fmt.Errorf("auth error %d: %s", resp.StatusCode, string(body))
 		}
 
+		// Handle 5xx - retryable server errors
+		if retryableHTTPStatusCodesV2[resp.StatusCode] && attempt < maxAttempts {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			delay := calculateRetryDelayV2(attempt)
+			log.Warnf("kiro-v2: stream server error %d (attempt %d/%d), retrying in %v", resp.StatusCode, attempt+1, maxAttempts, delay)
+			lastErr = fmt.Errorf("server error %d: %s", resp.StatusCode, string(body))
+			time.Sleep(delay)
+			continue
+		}
+
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			log.Warnf("kiro: stream upstream error %d for model %s: %s", resp.StatusCode, rc.req.Model, string(body))
+			log.Warnf("kiro-v2: stream upstream error %d for model %s: %s", resp.StatusCode, rc.req.Model, string(body))
 			return nil, fmt.Errorf("upstream error %d: %s", resp.StatusCode, string(body))
 		}
+
+		// Success — mark token as successful
+		rateLimiter.MarkTokenSuccess(rc.tokenKey)
 
 		out := make(chan cliproxyexecutor.StreamChunk)
 		go e.processStream(resp, rc.req.Model, rc.req.Payload, rc.sourceFormat, out)
@@ -1045,4 +1312,387 @@ func parseEventPayload(frame []byte) ([]byte, error) {
 		return nil, fmt.Errorf("bounds")
 	}
 	return frame[start:end], nil
+}
+
+const maxWebSearchIterationsV2 = 5
+
+// handleWebSearchV2 handles pure web_search requests for the non-streaming Execute path.
+func (e *KiroExecutorV2) handleWebSearchV2(
+	ctx context.Context,
+	auth *coreauth.Auth,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+) (cliproxyexecutor.Response, error) {
+	query := kiroclaude.ExtractSearchQuery(req.Payload)
+	if query == "" {
+		log.Warnf("kiro-v2/websearch: failed to extract search query, falling back to normal Execute")
+		return e.Execute(ctx, auth, withoutWebSearchV2(req), opts)
+	}
+
+	region := e.getAPIRegionV2(auth)
+	mcpEndpoint := fmt.Sprintf("https://q.%s.amazonaws.com/mcp", region)
+
+	token, updatedAuth, err := e.ensureValidToken(ctx, auth)
+	if err != nil {
+		return cliproxyexecutor.Response{}, fmt.Errorf("kiro-v2/websearch: token error: %w", err)
+	}
+	if updatedAuth != nil {
+		auth = updatedAuth
+	}
+
+	fp, authAttrs := e.getMCPAuthContextV2(auth, token)
+	httpClient := e.newMCPHTTPClientV2(ctx, auth)
+	kiroclaude.FetchToolDescription(mcpEndpoint, token, httpClient, fp, authAttrs)
+
+	_, mcpRequest := kiroclaude.CreateMcpRequest(query)
+	handler := kiroclaude.NewWebSearchHandler(mcpEndpoint, token, httpClient, fp, authAttrs)
+	mcpResponse, mcpErr := handler.CallMcpAPI(mcpRequest)
+
+	var searchResults *kiroclaude.WebSearchResults
+	if mcpErr != nil {
+		log.Warnf("kiro-v2/websearch: MCP API call failed: %v, continuing with empty results", mcpErr)
+	} else {
+		searchResults = kiroclaude.ParseSearchResults(mcpResponse)
+	}
+
+	resultCount := 0
+	if searchResults != nil {
+		resultCount = len(searchResults.Results)
+	}
+	log.Infof("kiro-v2/websearch: non-stream: got %d results for query: %s", resultCount, query)
+
+	toolUseID := fmt.Sprintf("srvtoolu_%s", kiroclaude.GenerateToolUseID())
+	modifiedPayload, err := kiroclaude.InjectToolResultsClaude(bytes.Clone(req.Payload), toolUseID, query, searchResults)
+	if err != nil {
+		log.Warnf("kiro-v2/websearch: failed to inject tool results: %v, falling back", err)
+		return e.Execute(ctx, auth, withoutWebSearchV2(req), opts)
+	}
+
+	modifiedPayload, _ = kiroclaude.StripWebSearchTool(modifiedPayload)
+	modifiedReq := req
+	modifiedReq.Payload = modifiedPayload
+	resp, err := e.Execute(ctx, auth, modifiedReq, opts)
+	if err != nil {
+		return resp, err
+	}
+
+	indicators := []kiroclaude.SearchIndicator{{
+		ToolUseID: toolUseID,
+		Query:     query,
+		Results:   searchResults,
+	}}
+	if injected, injErr := kiroclaude.InjectSearchIndicatorsInResponse(resp.Payload, indicators); injErr == nil {
+		resp.Payload = injected
+	} else {
+		log.Warnf("kiro-v2/websearch: failed to inject search indicators: %v", injErr)
+	}
+
+	return resp, nil
+}
+
+// handleWebSearchStreamV2 handles pure web_search requests for the streaming ExecuteStream path.
+// Implements a search loop: MCP search → inject results → call Kiro API → analyze → loop or return.
+func (e *KiroExecutorV2) handleWebSearchStreamV2(
+	ctx context.Context,
+	auth *coreauth.Auth,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+) (<-chan cliproxyexecutor.StreamChunk, error) {
+	query := kiroclaude.ExtractSearchQuery(req.Payload)
+	if query == "" {
+		log.Warnf("kiro-v2/websearch: failed to extract search query, falling back to normal stream")
+		return e.ExecuteStream(ctx, auth, withoutWebSearchV2(req), opts)
+	}
+
+	region := e.getAPIRegionV2(auth)
+	mcpEndpoint := fmt.Sprintf("https://q.%s.amazonaws.com/mcp", region)
+
+	token, updatedAuth, err := e.ensureValidToken(ctx, auth)
+	if err != nil {
+		return nil, fmt.Errorf("kiro-v2/websearch: token error: %w", err)
+	}
+	if updatedAuth != nil {
+		auth = updatedAuth
+	}
+
+	fp, authAttrs := e.getMCPAuthContextV2(auth, token)
+	httpClient := e.newMCPHTTPClientV2(ctx, auth)
+	kiroclaude.FetchToolDescription(mcpEndpoint, token, httpClient, fp, authAttrs)
+
+	out := make(chan cliproxyexecutor.StreamChunk)
+
+	go func() {
+		defer close(out)
+
+		msgStart := kiroclaude.SseEvent{
+			Event: "message_start",
+			Data: map[string]interface{}{
+				"type": "message_start",
+				"message": map[string]interface{}{
+					"id":            kiroclaude.GenerateMessageID(),
+					"type":          "message",
+					"role":          "assistant",
+					"model":         req.Model,
+					"content":       []interface{}{},
+					"stop_reason":   nil,
+					"stop_sequence": nil,
+					"usage": map[string]interface{}{
+						"input_tokens":                len(req.Payload) / 4,
+						"output_tokens":               0,
+						"cache_creation_input_tokens": 0,
+						"cache_read_input_tokens":     0,
+					},
+				},
+			},
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case out <- cliproxyexecutor.StreamChunk{Payload: []byte(msgStart.ToSSEString())}:
+		}
+
+		contentBlockIndex := 0
+		currentQuery := query
+		currentToolUseID := fmt.Sprintf("srvtoolu_%s", kiroclaude.GenerateToolUseID())
+
+		simplifiedPayload, simplifyErr := kiroclaude.ReplaceWebSearchToolDescription(bytes.Clone(req.Payload))
+		if simplifyErr != nil {
+			log.Warnf("kiro-v2/websearch: failed to simplify web_search tool: %v", simplifyErr)
+			simplifiedPayload = bytes.Clone(req.Payload)
+		}
+		currentPayload := simplifiedPayload
+
+		for iteration := 0; iteration < maxWebSearchIterationsV2; iteration++ {
+			log.Infof("kiro-v2/websearch: iteration %d/%d — query: %s",
+				iteration+1, maxWebSearchIterationsV2, currentQuery)
+
+			_, mcpRequest := kiroclaude.CreateMcpRequest(currentQuery)
+			handler := kiroclaude.NewWebSearchHandler(mcpEndpoint, token, httpClient, fp, authAttrs)
+			mcpResponse, mcpErr := handler.CallMcpAPI(mcpRequest)
+
+			var searchResults *kiroclaude.WebSearchResults
+			if mcpErr != nil {
+				log.Warnf("kiro-v2/websearch: MCP failed: %v", mcpErr)
+			} else {
+				searchResults = kiroclaude.ParseSearchResults(mcpResponse)
+			}
+
+			searchEvents := kiroclaude.GenerateSearchIndicatorEvents(currentQuery, currentToolUseID, searchResults, contentBlockIndex)
+			for _, event := range searchEvents {
+				select {
+				case <-ctx.Done():
+					return
+				case out <- cliproxyexecutor.StreamChunk{Payload: []byte(event.ToSSEString())}:
+				}
+			}
+			contentBlockIndex += 2
+
+			var injectErr error
+			currentPayload, injectErr = kiroclaude.InjectToolResultsClaude(currentPayload, currentToolUseID, currentQuery, searchResults)
+			if injectErr != nil {
+				log.Warnf("kiro-v2/websearch: inject failed: %v", injectErr)
+				e.sendFallbackTextV2(ctx, out, contentBlockIndex, currentQuery, searchResults)
+				break
+			}
+
+			kiroChunks, kiroErr := e.callKiroAndBufferV2(ctx, auth, req, opts, currentPayload)
+			if kiroErr != nil {
+				log.Warnf("kiro-v2/websearch: Kiro API failed at iteration %d: %v", iteration+1, kiroErr)
+				e.sendFallbackTextV2(ctx, out, contentBlockIndex, currentQuery, searchResults)
+				break
+			}
+
+			analysis := kiroclaude.AnalyzeBufferedStream(kiroChunks)
+			log.Infof("kiro-v2/websearch: iteration %d — stop: %s, has_tool_use: %v, query: %s",
+				iteration+1, analysis.StopReason, analysis.HasWebSearchToolUse, analysis.WebSearchQuery)
+
+			if analysis.HasWebSearchToolUse && analysis.WebSearchQuery != "" && iteration+1 < maxWebSearchIterationsV2 {
+				filtered := kiroclaude.FilterChunksForClient(kiroChunks, analysis.WebSearchToolUseIndex, contentBlockIndex)
+				for _, chunk := range filtered {
+					select {
+					case <-ctx.Done():
+						return
+					case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
+					}
+				}
+				currentQuery = analysis.WebSearchQuery
+				currentToolUseID = analysis.WebSearchToolUseId
+				continue
+			}
+
+			for _, chunk := range kiroChunks {
+				if contentBlockIndex > 0 && len(chunk) > 0 {
+					adjusted, shouldFwd := kiroclaude.AdjustSSEChunk(chunk, contentBlockIndex)
+					if !shouldFwd {
+						continue
+					}
+					select {
+					case <-ctx.Done():
+						return
+					case out <- cliproxyexecutor.StreamChunk{Payload: adjusted}:
+					}
+				} else {
+					select {
+					case <-ctx.Done():
+						return
+					case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
+					}
+				}
+			}
+			log.Infof("kiro-v2/websearch: completed after %d iteration(s)", iteration+1)
+			return
+		}
+
+		log.Warnf("kiro-v2/websearch: reached max iterations (%d)", maxWebSearchIterationsV2)
+	}()
+
+	return out, nil
+}
+
+// callKiroAndBufferV2 calls the Kiro API via the V2 streaming path and buffers all chunks.
+func (e *KiroExecutorV2) callKiroAndBufferV2(
+	ctx context.Context,
+	auth *coreauth.Auth,
+	originalReq cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+	claudePayload []byte,
+) ([][]byte, error) {
+	strippedPayload, _ := kiroclaude.StripWebSearchTool(claudePayload)
+
+	modifiedReq := originalReq
+	modifiedReq.Payload = strippedPayload
+
+	rc, err := e.prepareRequest(ctx, auth, modifiedReq, opts.SourceFormat.String())
+	if err != nil {
+		return nil, fmt.Errorf("kiro-v2/websearch: prepare failed: %w", err)
+	}
+
+	rc.sourceFormat = "claude"
+
+	stream, err := e.executeStreamWithRetry(rc)
+	if err != nil {
+		return nil, err
+	}
+
+	var chunks [][]byte
+	for chunk := range stream {
+		if chunk.Err != nil {
+			return chunks, chunk.Err
+		}
+		if len(chunk.Payload) > 0 {
+			chunks = append(chunks, bytes.Clone(chunk.Payload))
+		}
+	}
+
+	log.Debugf("kiro-v2/websearch: buffered %d chunks", len(chunks))
+	return chunks, nil
+}
+
+// sendFallbackTextV2 sends a text summary when the Kiro API fails during the search loop.
+func (e *KiroExecutorV2) sendFallbackTextV2(
+	ctx context.Context,
+	out chan<- cliproxyexecutor.StreamChunk,
+	contentBlockIndex int,
+	query string,
+	searchResults *kiroclaude.WebSearchResults,
+) {
+	summary := kiroclaude.FormatSearchContextPrompt(query, searchResults)
+
+	events := []kiroclaude.SseEvent{
+		{
+			Event: "content_block_start",
+			Data: map[string]interface{}{
+				"type":  "content_block_start",
+				"index": contentBlockIndex,
+				"content_block": map[string]interface{}{
+					"type": "text",
+					"text": "",
+				},
+			},
+		},
+		{
+			Event: "content_block_delta",
+			Data: map[string]interface{}{
+				"type":  "content_block_delta",
+				"index": contentBlockIndex,
+				"delta": map[string]interface{}{
+					"type": "text_delta",
+					"text": summary,
+				},
+			},
+		},
+		{
+			Event: "content_block_stop",
+			Data: map[string]interface{}{
+				"type":  "content_block_stop",
+				"index": contentBlockIndex,
+			},
+		},
+		{
+			Event: "message_delta",
+			Data: map[string]interface{}{
+				"type": "message_delta",
+				"delta": map[string]interface{}{
+					"stop_reason":   "end_turn",
+					"stop_sequence": nil,
+				},
+				"usage": map[string]interface{}{
+					"output_tokens": len(summary) / 4,
+				},
+			},
+		},
+		{
+			Event: "message_stop",
+			Data: map[string]interface{}{
+				"type": "message_stop",
+			},
+		},
+	}
+
+	for _, event := range events {
+		select {
+		case <-ctx.Done():
+			return
+		case out <- cliproxyexecutor.StreamChunk{Payload: []byte(event.ToSSEString())}:
+		}
+	}
+}
+
+// withoutWebSearchV2 returns a copy of the request with web_search tool stripped.
+func withoutWebSearchV2(req cliproxyexecutor.Request) cliproxyexecutor.Request {
+	stripped, err := kiroclaude.StripWebSearchTool(bytes.Clone(req.Payload))
+	if err != nil {
+		return req
+	}
+	modified := req
+	modified.Payload = stripped
+	return modified
+}
+
+// getAPIRegionV2 returns the Kiro API region from auth metadata.
+func (e *KiroExecutorV2) getAPIRegionV2(auth *coreauth.Auth) string {
+	if region := determineKiroAPIRegion(auth); region != "" {
+		return region
+	}
+	return kiroDefaultRegionV2
+}
+
+// getMCPAuthContextV2 extracts fingerprint and auth attributes for MCP calls.
+func (e *KiroExecutorV2) getMCPAuthContextV2(auth *coreauth.Auth, token string) (*kiroauth.Fingerprint, map[string]string) {
+	tokenKey := ""
+	if auth != nil {
+		tokenKey = auth.ID
+	}
+	fp := getGlobalFingerprintManager().GetFingerprint(tokenKey)
+
+	var authAttrs map[string]string
+	if auth != nil {
+		authAttrs = auth.Attributes
+	}
+	return fp, authAttrs
+}
+
+// newMCPHTTPClientV2 creates an HTTP client for MCP API calls.
+func (e *KiroExecutorV2) newMCPHTTPClientV2(ctx context.Context, auth *coreauth.Auth) *http.Client {
+	return newProxyAwareHTTPClient(ctx, e.cfg, auth, 30*time.Second)
 }

@@ -106,24 +106,15 @@ type ImageSource struct {
 
 // -- Conversion Logic --
 
+// remoteWebSearchDescription is a minimal fallback for when dynamic fetch from MCP tools/list hasn't completed yet.
+const remoteWebSearchDescription = "WebSearch looks up information outside the model's training data. Supports multiple queries to gather comprehensive information."
+
 // ConvertRequest converts UnifiedChatRequest to Kiro API JSON format.
 func (p *KiroProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 	origin := extractOrigin(req)
 	tools := extractToolsStruct(req.Tools)
-	injectWebSearchHint := false
-	if ir.DetectsNetworkingTool(req.Tools) {
-		// Kiro API doesn't support web_search built-in tools.
-		// We filter them out from tool specs and inject a hint to use Fetch/read_url_content instead.
-		injectWebSearchHint = true
-	}
-	if injectWebSearchHint {
-		tools = filterNetworkingTools(tools)
-	}
 
 	systemPrompt := extractSystemPrompt(req.Messages)
-	if injectWebSearchHint {
-		systemPrompt = injectWebSearchAlternativeHint(systemPrompt)
-	}
 
 	// Inject thinking mode configuration if present
 	// Kiro/Amazon Q supports official thinking mode via <thinking_mode> tag in system prompt
@@ -226,20 +217,31 @@ func extractToolsStruct(irTools []ir.ToolDefinition) []ToolSpecification {
 	if len(irTools) == 0 {
 		return nil
 	}
-	tools := make([]ToolSpecification, len(irTools))
-	for i, t := range irTools {
+	tools := make([]ToolSpecification, 0, len(irTools))
+	for _, t := range irTools {
 		// Use enhanced schema cleaning for better compatibility
 		// This handles $ref resolution, allOf merging, and removes unsupported keywords
 		cleanedSchema := ir.CleanJsonSchemaEnhanced(ir.CopyMap(t.Parameters))
 		finalSchema := ensureKiroInputSchema(cleanedSchema)
 
-		tools[i] = ToolSpecification{
+		name := shortenToolNameIfNeeded(t.Name)
+		description := t.Description
+
+		// Rename web_search → remote_web_search for Kiro API compatibility
+		if ir.IsNetworkingToolName(name) {
+			name = "remote_web_search"
+			if description == "" {
+				description = remoteWebSearchDescription
+			}
+		}
+
+		tools = append(tools, ToolSpecification{
 			ToolSpecification: ToolSpecDetails{
-				Name:        shortenToolNameIfNeeded(t.Name),
-				Description: t.Description,
+				Name:        name,
+				Description: description,
 				InputSchema: ToolInputSchema{Json: finalSchema},
 			},
-		}
+		})
 	}
 	return tools
 }
@@ -252,39 +254,6 @@ func extractSystemPrompt(messages []ir.Message) string {
 		}
 	}
 	return strings.Join(parts, "\n")
-}
-
-func filterNetworkingTools(tools []ToolSpecification) []ToolSpecification {
-	if len(tools) == 0 {
-		return tools
-	}
-	out := make([]ToolSpecification, 0, len(tools))
-	for _, t := range tools {
-		name := t.ToolSpecification.Name
-		if ir.IsNetworkingToolName(name) {
-			continue
-		}
-		out = append(out, t)
-	}
-	return out
-}
-
-func injectWebSearchAlternativeHint(systemPrompt string) string {
-	webSearchHint := `[CRITICAL WEB ACCESS INSTRUCTION]
-You have the Fetch/read_url_content tool available. When the user asks about current events, weather, news, or any information that requires web access:
-- DO NOT say you cannot search the web
-- DO NOT refuse to help with web-related queries
-- IMMEDIATELY use the Fetch tool to access relevant URLs
-- Use well-known official websites, documentation sites, or API endpoints
-- Construct appropriate URLs based on the query context
-
-IMPORTANT: Always attempt to fetch information FIRST before declining. You CAN access the web via Fetch.`
-
-	systemPrompt = strings.TrimSpace(systemPrompt)
-	if systemPrompt == "" {
-		return webSearchHint
-	}
-	return systemPrompt + "\n\n" + webSearchHint
 }
 
 const kiroMaxHistoryMessages = 50
@@ -525,9 +494,14 @@ func buildUserMessageStruct(msg ir.Message, tools []ToolSpecification, modelID, 
 func buildAssistantMessageStruct(msg ir.Message) *AssistantResponseMessage {
 	var toolUses []ToolUse
 	for _, tc := range msg.ToolCalls {
+		name := tc.Name
+		// Rename web_search → remote_web_search to match convertClaudeToolsToKiro
+		if ir.IsNetworkingToolName(name) {
+			name = "remote_web_search"
+		}
 		toolUses = append(toolUses, ToolUse{
 			ToolUseId: tc.ID,
-			Name:      tc.Name,
+			Name:      name,
 			Input:     ir.ParseToolCallArgs(tc.Args),
 		})
 	}

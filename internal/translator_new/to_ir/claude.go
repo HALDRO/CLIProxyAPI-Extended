@@ -133,14 +133,20 @@ func ParseClaudeRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 
 	// Thinking/Reasoning config
 	if thinking := parsed.Get("thinking"); thinking.Exists() && thinking.IsObject() {
-		if thinking.Get("type").String() == "enabled" {
+		switch thinking.Get("type").String() {
+		case "enabled":
 			req.Thinking = &ir.ThinkingConfig{IncludeThoughts: true}
 			if budget := thinking.Get("budget_tokens"); budget.Exists() {
 				req.Thinking.Budget = int(budget.Int())
 			} else {
 				req.Thinking.Budget = -1 // Auto
 			}
-		} else if thinking.Get("type").String() == "disabled" {
+		case "adaptive":
+			// Claude adaptive means "enable with max capacity".
+			// Map to IncludeThoughts + auto budget; each from_ir provider resolves
+			// this to its model-specific max capability.
+			req.Thinking = &ir.ThinkingConfig{IncludeThoughts: true, Budget: -1}
+		case "disabled":
 			req.Thinking = &ir.ThinkingConfig{IncludeThoughts: false, Budget: 0}
 		}
 	}
