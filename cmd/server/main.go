@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/url"
 	"os"
@@ -27,6 +28,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/tui"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
@@ -74,9 +76,9 @@ func main() {
 	var codexLogin bool
 	var claudeLogin bool
 	var qwenLogin bool
+	var kiloLogin bool
 	var iflowLogin bool
 	var iflowCookie bool
-	var kiloCodeLogin bool
 	var noBrowser bool
 	var oauthCallbackPort int
 	var antigravityLogin bool
@@ -91,6 +93,8 @@ func main() {
 	var vertexImport string
 	var configPath string
 	var password string
+	var tuiMode bool
+	var standalone bool
 	var noIncognito bool
 	var useIncognito bool
 
@@ -99,9 +103,9 @@ func main() {
 	flag.BoolVar(&codexLogin, "codex-login", false, "Login to Codex using OAuth")
 	flag.BoolVar(&claudeLogin, "claude-login", false, "Login to Claude using OAuth")
 	flag.BoolVar(&qwenLogin, "qwen-login", false, "Login to Qwen using OAuth")
+	flag.BoolVar(&kiloLogin, "kilo-login", false, "Login to Kilo AI using device flow")
 	flag.BoolVar(&iflowLogin, "iflow-login", false, "Login to iFlow using OAuth")
 	flag.BoolVar(&iflowCookie, "iflow-cookie", false, "Login to iFlow using Cookie")
-	flag.BoolVar(&kiloCodeLogin, "kilocode-login", false, "Login to KiloCode (Roo Code Cloud) using Clerk session")
 	flag.BoolVar(&noBrowser, "no-browser", false, "Don't open browser automatically for OAuth")
 	flag.IntVar(&oauthCallbackPort, "oauth-callback-port", 0, "Override OAuth callback port (defaults to provider-specific port)")
 	flag.BoolVar(&useIncognito, "incognito", false, "Open browser in incognito/private mode for OAuth (useful for multiple accounts)")
@@ -118,6 +122,8 @@ func main() {
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&password, "password", "", "")
+	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
+	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -506,12 +512,12 @@ func main() {
 		cmd.DoClaudeLogin(cfg, options)
 	} else if qwenLogin {
 		cmd.DoQwenLogin(cfg, options)
+	} else if kiloLogin {
+		cmd.DoKiloLogin(cfg, options)
 	} else if iflowLogin {
 		cmd.DoIFlowLogin(cfg, options)
 	} else if iflowCookie {
 		cmd.DoIFlowCookieAuth(cfg, options)
-	} else if kiloCodeLogin {
-		cmd.DoKiloCodeLogin(cfg, options)
 	} else if kimiLogin {
 		cmd.DoKimiLogin(cfg, options)
 	} else if kiroLogin || kiroGoogleLogin {
@@ -539,15 +545,89 @@ func main() {
 			cmd.WaitForCloudDeploy()
 			return
 		}
-		// Start the main proxy service
-		managementasset.StartAutoUpdater(context.Background(), configFilePath)
+		if tuiMode {
+			if standalone {
+				// Standalone mode: start an embedded local server and connect TUI client to it.
+				managementasset.StartAutoUpdater(context.Background(), configFilePath)
+				hook := tui.NewLogHook(2000)
+				hook.SetFormatter(&logging.LogFormatter{})
+				log.AddHook(hook)
 
-		// 初始化并启动 Kiro token 后台刷新
-		if cfg.AuthDir != "" {
-			kiro.InitializeAndStart(cfg.AuthDir, cfg)
-			defer kiro.StopGlobalRefreshManager()
+				origStdout := os.Stdout
+				origStderr := os.Stderr
+				origLogOutput := log.StandardLogger().Out
+				log.SetOutput(io.Discard)
+
+				devNull, errOpenDevNull := os.Open(os.DevNull)
+				if errOpenDevNull == nil {
+					os.Stdout = devNull
+					os.Stderr = devNull
+				}
+
+				restoreIO := func() {
+					os.Stdout = origStdout
+					os.Stderr = origStderr
+					log.SetOutput(origLogOutput)
+					if devNull != nil {
+						_ = devNull.Close()
+					}
+				}
+
+				localMgmtPassword := fmt.Sprintf("tui-%d-%d", os.Getpid(), time.Now().UnixNano())
+				if password == "" {
+					password = localMgmtPassword
+				}
+
+				cancel, done := cmd.StartServiceBackground(cfg, configFilePath, password)
+
+				client := tui.NewClient(cfg.Port, password)
+				ready := false
+				backoff := 100 * time.Millisecond
+				for i := 0; i < 30; i++ {
+					if _, errGetConfig := client.GetConfig(); errGetConfig == nil {
+						ready = true
+						break
+					}
+					time.Sleep(backoff)
+					if backoff < time.Second {
+						backoff = time.Duration(float64(backoff) * 1.5)
+					}
+				}
+
+				if !ready {
+					restoreIO()
+					cancel()
+					<-done
+					fmt.Fprintf(os.Stderr, "TUI error: embedded server is not ready\n")
+					return
+				}
+
+				if errRun := tui.Run(cfg.Port, password, hook, origStdout); errRun != nil {
+					restoreIO()
+					fmt.Fprintf(os.Stderr, "TUI error: %v\n", errRun)
+				} else {
+					restoreIO()
+				}
+
+				cancel()
+				<-done
+			} else {
+				// Default TUI mode: pure management client.
+				// The proxy server must already be running.
+				if errRun := tui.Run(cfg.Port, password, nil, os.Stdout); errRun != nil {
+					fmt.Fprintf(os.Stderr, "TUI error: %v\n", errRun)
+				}
+			}
+		} else {
+      // Start the main proxy service
+      managementasset.StartAutoUpdater(context.Background(), configFilePath)
+
+      if cfg.AuthDir != "" {
+        kiro.InitializeAndStart(cfg.AuthDir, cfg)
+        defer kiro.StopGlobalRefreshManager()
+      }
+
+      cmd.StartService(cfg, configFilePath, password)
 		}
-
-		cmd.StartService(cfg, configFilePath, password)
 	}
 }

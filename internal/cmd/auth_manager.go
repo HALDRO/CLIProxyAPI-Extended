@@ -23,6 +23,7 @@ func newAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewKimiAuthenticator(),
 		sdkAuth.NewKiroAuthenticator(),
 		sdkAuth.NewGitHubCopilotAuthenticator(),
+		sdkAuth.NewKiloAuthenticator(),
 	)
 	return manager
 }

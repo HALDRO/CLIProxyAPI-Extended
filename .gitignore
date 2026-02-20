@@ -3,10 +3,11 @@ cli-proxy-api
 cliproxy
 *.exe
 
+
 # Configuration
 config.yaml
 .env
-
+.mcp.json
 # Generated content
 bin/*
 logs/*

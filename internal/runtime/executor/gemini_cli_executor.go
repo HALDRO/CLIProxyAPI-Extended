@@ -225,9 +225,8 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
 			reporter.publish(ctx, parseGeminiCLIUsage(data))
 			var param any
-	out := sdktranslator.TranslateNonStream(respCtx, to, from, attemptModel, opts.OriginalRequest, payload, data, &param)
-
-			resp = cliproxyexecutor.Response{Payload: []byte(out)}
+			out := sdktranslator.TranslateNonStream(respCtx, to, from, attemptModel, opts.OriginalRequest, payload, data, &param)
+			resp = cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}
 			return resp, nil
 		}
 
@@ -258,7 +257,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 }
 
 // ExecuteStream performs a streaming request to the Gemini CLI API.
-func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
+func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
@@ -385,7 +384,6 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		}
 
 		out := make(chan cliproxyexecutor.StreamChunk)
-		stream = out
 		go func(resp *http.Response, reqBody []byte, attemptModel string) {
 			defer close(out)
 			defer func() {
@@ -445,7 +443,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 			}
 		}(httpResp, append([]byte(nil), payload...), attemptModel)
 
-		return stream, nil
+		return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 	}
 
 	if len(lastBody) > 0 {
@@ -550,7 +548,7 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			count := gjson.GetBytes(data, "totalTokens").Int()
 			translated := sdktranslator.TranslateTokenCount(respCtx, to, from, count, data)
-			return cliproxyexecutor.Response{Payload: []byte(translated)}, nil
+			return cliproxyexecutor.Response{Payload: []byte(translated), Headers: resp.Header.Clone()}, nil
 		}
 		lastStatus = resp.StatusCode
 		lastBody = append([]byte(nil), data...)
@@ -903,8 +901,7 @@ func parseRetryDelay(errorBody []byte) (*time.Duration, error) {
 		if matches := re.FindStringSubmatch(message); len(matches) > 1 {
 			seconds, err := strconv.Atoi(matches[1])
 			if err == nil {
-				duration := time.Duration(seconds) * time.Second
-				return &duration, nil
+				return new(time.Duration(seconds) * time.Second), nil
 			}
 		}
 	}
