@@ -256,7 +256,7 @@ func extractSystemPrompt(messages []ir.Message) string {
 	return strings.Join(parts, "\n")
 }
 
-const kiroMaxHistoryMessages = 50
+const kiroMaxHistoryMessages = 999
 
 func truncateHistoryIfNeeded(history []HistoryMessage) []HistoryMessage {
 	if len(history) <= kiroMaxHistoryMessages {
