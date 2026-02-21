@@ -7,14 +7,14 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// sseEvent represents a Server-Sent Event
-type sseEvent struct {
+// SseEvent represents a Server-Sent Event
+type SseEvent struct {
 	Event string
 	Data  interface{}
 }
 
 // ToSSEString converts the event to SSE wire format
-func (e *sseEvent) ToSSEString() string {
+func (e *SseEvent) ToSSEString() string {
 	dataBytes, _ := json.Marshal(e.Data)
 	return "event: " + e.Event + "\ndata: " + string(dataBytes) + "\n\n"
 }

@@ -890,7 +890,7 @@ func (e *KiroExecutorV2) convertToSourceFormat(messages []ir.Message, usage *ir.
 	}
 }
 
-func (e *KiroExecutorV2) ExecuteStream(ctx context.Context, auth *coreauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (<-chan cliproxyexecutor.StreamChunk, error) {
+func (e *KiroExecutorV2) ExecuteStream(ctx context.Context, auth *coreauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	// Check for pure web_search request — route to MCP endpoint
 	if kiroclaude.HasWebSearchTool(req.Payload) {
 		log.Infof("kiro-v2: detected pure web_search request, routing to MCP endpoint")
@@ -916,7 +916,7 @@ func (e *KiroExecutorV2) ExecuteStream(ctx context.Context, auth *coreauth.Auth,
 	return e.executeStreamWithRetry(rc)
 }
 
-func (e *KiroExecutorV2) executeStreamWithRetry(rc *requestContext) (<-chan cliproxyexecutor.StreamChunk, error) {
+func (e *KiroExecutorV2) executeStreamWithRetry(rc *requestContext) (*cliproxyexecutor.StreamResult, error) {
 	var lastErr error
 	currentOrigin := rc.origin
 	initialOrigin := rc.origin
@@ -1032,7 +1032,7 @@ func (e *KiroExecutorV2) executeStreamWithRetry(rc *requestContext) (<-chan clip
 
 		out := make(chan cliproxyexecutor.StreamChunk)
 		go e.processStream(resp, rc.req.Model, rc.req.Payload, rc.sourceFormat, out)
-		return out, nil
+		return &cliproxyexecutor.StreamResult{Chunks: out}, nil
 	}
 
 	if lastErr != nil {
@@ -1397,7 +1397,7 @@ func (e *KiroExecutorV2) handleWebSearchStreamV2(
 	auth *coreauth.Auth,
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
-) (<-chan cliproxyexecutor.StreamChunk, error) {
+) (*cliproxyexecutor.StreamResult, error) {
 	query := kiroclaude.ExtractSearchQuery(req.Payload)
 	if query == "" {
 		log.Warnf("kiro-v2/websearch: failed to extract search query, falling back to normal stream")
@@ -1546,7 +1546,7 @@ func (e *KiroExecutorV2) handleWebSearchStreamV2(
 		log.Warnf("kiro-v2/websearch: reached max iterations (%d)", maxWebSearchIterationsV2)
 	}()
 
-	return out, nil
+	return &cliproxyexecutor.StreamResult{Chunks: out}, nil
 }
 
 // callKiroAndBufferV2 calls the Kiro API via the V2 streaming path and buffers all chunks.
@@ -1575,7 +1575,7 @@ func (e *KiroExecutorV2) callKiroAndBufferV2(
 	}
 
 	var chunks [][]byte
-	for chunk := range stream {
+	for chunk := range stream.Chunks {
 		if chunk.Err != nil {
 			return chunks, chunk.Err
 		}

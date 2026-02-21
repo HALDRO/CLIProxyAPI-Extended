@@ -60,12 +60,12 @@ func providerIDToLabel(provider string) string {
 		return "Claude"
 	case "codex":
 		return "Codex"
-	case "kilocode":
-		return "KiloCode"
 	case "qwen":
 		return "Qwen"
 	case "kiro":
 		return "Kiro"
+	case "kilo":
+		return "Kilo"
 	case "openai", "openai-compatibility":
 		return "OpenAI"
 	default:
@@ -87,12 +87,12 @@ func labelToProviderID(label string) string {
 		return "claude"
 	case "codex":
 		return "codex"
-	case "kilocode":
-		return "kilocode"
 	case "qwen":
 		return "qwen"
 	case "kiro":
 		return "kiro"
+	case "kilo":
+		return "kilo"
 	case "openai":
 		return "openai"
 	default:

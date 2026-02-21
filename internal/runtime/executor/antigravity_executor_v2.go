@@ -321,7 +321,7 @@ attemptLoop:
 			if err != nil {
 				return resp, fmt.Errorf("translate response: %w", err)
 			}
-			resp = cliproxyexecutor.Response{Payload: translated}
+			resp = cliproxyexecutor.Response{Payload: translated, Headers: httpResp.Header.Clone()}
 			reporter.ensurePublished(ctx)
 			return resp, nil
 		}
@@ -355,7 +355,7 @@ attemptLoop:
 	return resp, statusErr{code: http.StatusServiceUnavailable, msg: "antigravity canonical executor: no base url available"}
 }
 
-func (e *AntigravityExecutorV2) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
+func (e *AntigravityExecutorV2) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
@@ -479,7 +479,6 @@ attemptLoop:
 			}
 
 			out := make(chan cliproxyexecutor.StreamChunk)
-			stream = out
 			go func(resp *http.Response) {
 				defer close(out)
 				defer func() {
@@ -556,7 +555,7 @@ attemptLoop:
 				reporter.ensurePublished(ctx)
 			}(httpResp)
 
-			return stream, nil
+			return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 		}
 
 		if lastStatus != 0 {

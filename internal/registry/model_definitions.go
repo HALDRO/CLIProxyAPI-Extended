@@ -41,8 +41,6 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAIStudioModels()
 	case "codex":
 		return GetOpenAIModels()
-	case "kilocode":
-		return GetKiloCodeModels()
 	case "qwen":
 		return GetQwenModels()
 	case "iflow":
@@ -661,35 +659,7 @@ func GetKiroModels() []*ModelInfo {
 	}
 }
 
-// GetKiloCodeModels returns the standard KiloCode model definitions.
-func GetKiloCodeModels() []*ModelInfo {
-	return []*ModelInfo{
-		{
-			ID:                  "minimax/minimax-m2.1:free",
-			Object:              "model",
-			Created:             1758672000,
-			OwnedBy:             "kilocode",
-			Type:                "kilocode",
-			DisplayName:         "MiniMax M2.1 (free)",
-			Description:         "MiniMax M2.1 free model via Kilo Gateway",
-			ContextLength:       204800,
-			MaxCompletionTokens: 131072,
-			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
-		},
-		{
-			ID:                  "z-ai/glm-4.7:free",
-			Object:              "model",
-			Created:             1750000000,
-			OwnedBy:             "kilocode",
-			Type:                "kilocode",
-			DisplayName:         "GLM 4.7 (free)",
-			Description:         "Z.AI GLM 4.7 free model via Kilo Gateway",
-			ContextLength:       202752,
-			MaxCompletionTokens: 16384,
-			Thinking:            &ThinkingSupport{Levels: []string{"none", "auto", "minimal", "low", "medium", "high", "xhigh"}},
-		},
-	}
-}
+
 
 // GetAmazonQModels returns the Amazon Q (AWS CodeWhisperer) model definitions.
 // These models use the same API as Kiro and share the same executor.

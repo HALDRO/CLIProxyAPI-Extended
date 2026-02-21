@@ -194,45 +194,9 @@ func GenerateSearchIndicatorEvents(
 	toolUseID string,
 	searchResults *WebSearchResults,
 	startIndex int,
-) [][]byte {
-	events := make([][]byte, 0, 5)
-
-	// 1. content_block_start (server_tool_use)
-	event1 := map[string]interface{}{
-		"type":  "content_block_start",
-		"index": startIndex,
-		"content_block": map[string]interface{}{
-			"id":    toolUseID,
-			"type":  "server_tool_use",
-			"name":  "web_search",
-			"input": map[string]interface{}{},
-		},
-	}
-	data1, _ := json.Marshal(event1)
-	events = append(events, []byte("event: content_block_start\ndata: "+string(data1)+"\n\n"))
-
-	// 2. content_block_delta (input_json_delta)
+) []SseEvent {
 	inputJSON, _ := json.Marshal(map[string]string{"query": query})
-	event2 := map[string]interface{}{
-		"type":  "content_block_delta",
-		"index": startIndex,
-		"delta": map[string]interface{}{
-			"type":         "input_json_delta",
-			"partial_json": string(inputJSON),
-		},
-	}
-	data2, _ := json.Marshal(event2)
-	events = append(events, []byte("event: content_block_delta\ndata: "+string(data2)+"\n\n"))
 
-	// 3. content_block_stop (server_tool_use)
-	event3 := map[string]interface{}{
-		"type":  "content_block_stop",
-		"index": startIndex,
-	}
-	data3, _ := json.Marshal(event3)
-	events = append(events, []byte("event: content_block_stop\ndata: "+string(data3)+"\n\n"))
-
-	// 4. content_block_start (web_search_tool_result)
 	searchContent := make([]map[string]interface{}, 0)
 	if searchResults != nil {
 		for _, r := range searchResults.Results {
@@ -249,27 +213,59 @@ func GenerateSearchIndicatorEvents(
 			})
 		}
 	}
-	event4 := map[string]interface{}{
-		"type":  "content_block_start",
-		"index": startIndex + 1,
-		"content_block": map[string]interface{}{
-			"type":        "web_search_tool_result",
-			"tool_use_id": toolUseID,
-			"content":     searchContent,
+
+	return []SseEvent{
+		{
+			Event: "content_block_start",
+			Data: map[string]interface{}{
+				"type":  "content_block_start",
+				"index": startIndex,
+				"content_block": map[string]interface{}{
+					"id":    toolUseID,
+					"type":  "server_tool_use",
+					"name":  "web_search",
+					"input": map[string]interface{}{},
+				},
+			},
+		},
+		{
+			Event: "content_block_delta",
+			Data: map[string]interface{}{
+				"type":  "content_block_delta",
+				"index": startIndex,
+				"delta": map[string]interface{}{
+					"type":         "input_json_delta",
+					"partial_json": string(inputJSON),
+				},
+			},
+		},
+		{
+			Event: "content_block_stop",
+			Data: map[string]interface{}{
+				"type":  "content_block_stop",
+				"index": startIndex,
+			},
+		},
+		{
+			Event: "content_block_start",
+			Data: map[string]interface{}{
+				"type":  "content_block_start",
+				"index": startIndex + 1,
+				"content_block": map[string]interface{}{
+					"type":        "web_search_tool_result",
+					"tool_use_id": toolUseID,
+					"content":     searchContent,
+				},
+			},
+		},
+		{
+			Event: "content_block_stop",
+			Data: map[string]interface{}{
+				"type":  "content_block_stop",
+				"index": startIndex + 1,
+			},
 		},
 	}
-	data4, _ := json.Marshal(event4)
-	events = append(events, []byte("event: content_block_start\ndata: "+string(data4)+"\n\n"))
-
-	// 5. content_block_stop (web_search_tool_result)
-	event5 := map[string]interface{}{
-		"type":  "content_block_stop",
-		"index": startIndex + 1,
-	}
-	data5, _ := json.Marshal(event5)
-	events = append(events, []byte("event: content_block_stop\ndata: "+string(data5)+"\n\n"))
-
-	return events
 }
 
 // BuildFallbackTextEvents generates SSE events for a fallback text response
