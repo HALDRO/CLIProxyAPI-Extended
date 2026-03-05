@@ -389,6 +389,12 @@ func convertUnifiedEventsToChunks(events []ir.UnifiedEvent, to sdktranslator.For
 						effectiveIdx = state.ToolCallIndex
 						state.OutputIndexMap[outputIdx] = effectiveIdx
 						state.ToolCallIndex++
+					} else if event.Type == ir.EventTypeToolCallDelta && state.ToolCallIndex > 0 {
+						// Delta without ID and unknown index — this is a continuation
+						// of arguments from a buggy upstream that increments index
+						// for each chunk. Map to the last known tool call.
+						effectiveIdx = state.ToolCallIndex - 1
+						state.OutputIndexMap[outputIdx] = effectiveIdx
 					}
 				}
 				// Apply the effective index to the event

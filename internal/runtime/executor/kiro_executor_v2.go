@@ -27,9 +27,9 @@ import (
 	"github.com/google/uuid"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	kiroclaude "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	kiroclaude "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/from_ir"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/to_ir"
@@ -53,7 +53,7 @@ const (
 	kiroMaxRetries     = 2
 
 	// Socket retry configuration constants
-	kiroSocketMaxRetriesV2    = 3
+	kiroSocketMaxRetriesV2     = 3
 	kiroSocketBaseRetryDelayV2 = 1 * time.Second
 	kiroSocketMaxRetryDelayV2  = 30 * time.Second
 
@@ -591,6 +591,10 @@ func (e *KiroExecutorV2) prepareRequest(ctx context.Context, auth *coreauth.Auth
 	}
 	rc.irReq.Model = rc.kiroModelID
 
+	// Default Kiro thinking mode to enabled when client doesn't send any thinking config.
+	// Explicit client settings (including disabled) are preserved as-is.
+	applyDefaultKiroThinking(rc.irReq)
+
 	// Initialize metadata if needed (single check)
 	if rc.irReq.Metadata == nil {
 		rc.irReq.Metadata = make(map[string]any)
@@ -603,7 +607,7 @@ func (e *KiroExecutorV2) prepareRequest(ctx context.Context, auth *coreauth.Auth
 		}
 	}
 
-	// Set origin for quota management
+	// Preserve origin for quota routing (CLI vs AI_EDITOR) in Kiro request body.
 	rc.irReq.Metadata["origin"] = rc.origin
 
 	// Inject agentic system prompt if needed
@@ -619,6 +623,17 @@ func (e *KiroExecutorV2) prepareRequest(ctx context.Context, auth *coreauth.Auth
 
 	rc.kiroBody, err = (&from_ir.KiroProvider{}).ConvertRequest(rc.irReq)
 	return rc, err
+}
+
+func applyDefaultKiroThinking(req *ir.UnifiedChatRequest) {
+	if req == nil || req.Thinking != nil {
+		return
+	}
+
+	req.Thinking = &ir.ThinkingConfig{
+		IncludeThoughts: true,
+		Budget:          16000,
+	}
 }
 
 func (e *KiroExecutorV2) injectAgenticPrompt(req *ir.UnifiedChatRequest) {
@@ -846,8 +861,16 @@ func (e *KiroExecutorV2) handleEventStreamResponse(body io.ReadCloser, model str
 			state.ProcessChunk(payload)
 		}
 	}
+	for _, ev := range state.FlushPendingContent() {
+		if ev.Type == ir.EventTypeToolCall && ev.ToolCall != nil {
+			state.ToolCalls = append(state.ToolCalls, *ev.ToolCall)
+		}
+	}
 
 	msg := &ir.Message{Role: ir.RoleAssistant, ToolCalls: state.ToolCalls}
+	if state.AccumulatedThinking != "" {
+		msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeReasoning, Reasoning: state.AccumulatedThinking})
+	}
 	if state.AccumulatedContent != "" {
 		msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: state.AccumulatedContent})
 	}
@@ -1030,8 +1053,9 @@ func (e *KiroExecutorV2) executeStreamWithRetry(rc *requestContext) (*cliproxyex
 		// Success — mark token as successful
 		rateLimiter.MarkTokenSuccess(rc.tokenKey)
 
-		out := make(chan cliproxyexecutor.StreamChunk)
-		go e.processStream(resp, rc.req.Model, rc.req.Payload, rc.sourceFormat, out)
+		// Buffer stream chunks to reduce backpressure during intensive reasoning streams.
+		out := make(chan cliproxyexecutor.StreamChunk, 256)
+		go e.processStream(rc.ctx, resp, rc.req.Model, rc.req.Payload, rc.sourceFormat, out)
 		return &cliproxyexecutor.StreamResult{Chunks: out}, nil
 	}
 
@@ -1041,9 +1065,21 @@ func (e *KiroExecutorV2) executeStreamWithRetry(rc *requestContext) (*cliproxyex
 	return nil, fmt.Errorf("kiro: max retries exceeded for stream")
 }
 
-func (e *KiroExecutorV2) processStream(resp *http.Response, model string, requestPayload []byte, sourceFormat string, out chan<- cliproxyexecutor.StreamChunk) {
+func (e *KiroExecutorV2) processStream(ctx context.Context, resp *http.Response, model string, requestPayload []byte, sourceFormat string, out chan<- cliproxyexecutor.StreamChunk) {
 	defer resp.Body.Close()
 	defer close(out)
+
+	emitChunk := func(payload []byte) bool {
+		if len(payload) == 0 {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case out <- cliproxyexecutor.StreamChunk{Payload: payload}:
+			return true
+		}
+	}
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(nil, 52_428_800) // 50MB buffer to handle large AWS EventStream frames
@@ -1071,10 +1107,29 @@ func (e *KiroExecutorV2) processStream(resp *http.Response, model string, reques
 		for _, ev := range events {
 			chunk, err := e.convertStreamChunkToSourceFormat(ev, model, messageID, idx, sourceFormat, claudeState)
 			if err == nil && len(chunk) > 0 {
-				out <- cliproxyexecutor.StreamChunk{Payload: chunk}
+				if !emitChunk(chunk) {
+					return
+				}
 				idx++
 			}
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		log.Warnf("kiro-v2: stream scanner terminated with error: %v", err)
+	}
+
+	// Flush buffered partial tag suffixes at stream end.
+	for _, ev := range state.FlushPendingContent() {
+		chunk, err := e.convertStreamChunkToSourceFormat(ev, model, messageID, idx, sourceFormat, claudeState)
+		if err == nil && len(chunk) > 0 {
+			if !emitChunk(chunk) {
+				return
+			}
+			idx++
+		}
+	}
+	if ctx.Err() != nil {
+		return
 	}
 
 	// Build finish event with usage
@@ -1125,7 +1180,7 @@ func (e *KiroExecutorV2) processStream(resp *http.Response, model string, reques
 
 	chunk, err := e.convertStreamChunkToSourceFormat(finish, model, messageID, idx, sourceFormat, claudeState)
 	if err == nil && len(chunk) > 0 {
-		out <- cliproxyexecutor.StreamChunk{Payload: chunk}
+		_ = emitChunk(chunk)
 	}
 }
 
@@ -1419,7 +1474,7 @@ func (e *KiroExecutorV2) handleWebSearchStreamV2(
 	httpClient := e.newMCPHTTPClientV2(ctx, auth)
 	kiroclaude.FetchToolDescription(mcpEndpoint, token, httpClient, fp, authAttrs)
 
-	out := make(chan cliproxyexecutor.StreamChunk)
+	out := make(chan cliproxyexecutor.StreamChunk, 256)
 
 	go func() {
 		defer close(out)

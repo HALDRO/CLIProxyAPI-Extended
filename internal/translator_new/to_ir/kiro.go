@@ -126,6 +126,7 @@ type KiroStreamState struct {
 	CurrentToolInput          string
 	ToolCalls                 []ir.ToolCall
 	InThinkingBlock           bool    // Whether we're currently inside a <thinking> block
+	PendingContent            string  // Pending suffix that may be a partial thinking tag across chunks
 	AccumulatedThinking       string  // Accumulated thinking content
 	UpstreamContextPercentage float64 // Context usage percentage from contextUsageEvent (0.0 - 1.0)
 	ContextWindowTokens       int     // Model context window used to convert context percentage to prompt tokens
@@ -367,11 +368,16 @@ func (s *KiroStreamState) processReasoningEvent(parsed gjson.Result) []ir.Unifie
 	// Check for reasoningContentEvent (official Kiro thinking mode)
 	if reasoning := parsed.Get("reasoningContentEvent"); reasoning.Exists() {
 		content := reasoning.Get("content").String()
+		if content == "" {
+			content = reasoning.Get("text").String()
+		}
+		signature := reasoning.Get("signature").String()
 		if content != "" {
 			s.AccumulatedThinking += content
 			events = append(events, ir.UnifiedEvent{
-				Type:      ir.EventTypeReasoning,
-				Reasoning: content,
+				Type:             ir.EventTypeReasoning,
+				Reasoning:        content,
+				ThoughtSignature: signature,
 			})
 		}
 		return events
@@ -399,7 +405,8 @@ func (s *KiroStreamState) processReasoningEvent(parsed gjson.Result) []ir.Unifie
 func (s *KiroStreamState) processContentWithThinking(content string) ([]ir.UnifiedEvent, []ir.UnifiedEvent) {
 	var textEvents, thinkingEvents []ir.UnifiedEvent
 
-	remaining := content
+	remaining := s.PendingContent + content
+	s.PendingContent = ""
 
 	for len(remaining) > 0 {
 		if s.InThinkingBlock {
@@ -417,73 +424,111 @@ func (s *KiroStreamState) processContentWithThinking(content string) ([]ir.Unifi
 				}
 				s.InThinkingBlock = false
 				remaining = remaining[endIdx+len(kiroThinkingEndTag):]
-			} else {
-				// No end tag found - all remaining content is thinking
-				if remaining != "" {
-					s.AccumulatedThinking += remaining
-					thinkingEvents = append(thinkingEvents, ir.UnifiedEvent{
-						Type:      ir.EventTypeReasoning,
-						Reasoning: remaining,
-					})
-				}
-				break
+				continue
 			}
-		} else {
-			// We're outside a thinking block, look for <thinking>
-			startIdx := strings.Index(remaining, kiroThinkingStartTag)
-			if startIdx >= 0 {
-				// Found start tag - emit text content before the tag
-				textBefore := remaining[:startIdx]
-				if textBefore != "" {
-					cleanContent, embeddedTools := ParseEmbeddedToolCalls(textBefore)
-					if cleanContent != "" {
-						s.AccumulatedContent += cleanContent
-						textEvents = append(textEvents, ir.UnifiedEvent{
-							Type:    ir.EventTypeToken,
-							Content: cleanContent,
-						})
-					}
-					for _, tc := range embeddedTools {
-						if !s.hasToolCall(tc.ID) {
-							s.ToolCalls = append(s.ToolCalls, tc)
-							tcCopy := tc
-							textEvents = append(textEvents, ir.UnifiedEvent{
-								Type:     ir.EventTypeToolCall,
-								ToolCall: &tcCopy,
-							})
-						}
-					}
-				}
-				s.InThinkingBlock = true
-				remaining = remaining[startIdx+len(kiroThinkingStartTag):]
-			} else {
-				// No start tag found - all remaining content is regular text
-				if remaining != "" {
-					cleanContent, embeddedTools := ParseEmbeddedToolCalls(remaining)
-					if cleanContent != "" {
-						s.AccumulatedContent += cleanContent
-						textEvents = append(textEvents, ir.UnifiedEvent{
-							Type:    ir.EventTypeToken,
-							Content: cleanContent,
-						})
-					}
-					for _, tc := range embeddedTools {
-						if !s.hasToolCall(tc.ID) {
-							s.ToolCalls = append(s.ToolCalls, tc)
-							tcCopy := tc
-							textEvents = append(textEvents, ir.UnifiedEvent{
-								Type:     ir.EventTypeToolCall,
-								ToolCall: &tcCopy,
-							})
-						}
-					}
-				}
-				break
+
+			// No full end tag found - keep possible partial suffix for next chunk
+			emitPart, pending := splitPotentialTagSuffix(remaining, kiroThinkingEndTag)
+			if emitPart != "" {
+				s.AccumulatedThinking += emitPart
+				thinkingEvents = append(thinkingEvents, ir.UnifiedEvent{
+					Type:      ir.EventTypeReasoning,
+					Reasoning: emitPart,
+				})
 			}
+			s.PendingContent = pending
+			break
 		}
+
+		// We're outside a thinking block, look for <thinking>
+		startIdx := strings.Index(remaining, kiroThinkingStartTag)
+		if startIdx >= 0 {
+			// Found start tag - emit text content before the tag
+			if startIdx > 0 {
+				textEvents = append(textEvents, s.buildTextEvents(remaining[:startIdx])...)
+			}
+			s.InThinkingBlock = true
+			remaining = remaining[startIdx+len(kiroThinkingStartTag):]
+			continue
+		}
+
+		// No full start tag found - keep possible partial suffix for next chunk
+		emitPart, pending := splitPotentialTagSuffix(remaining, kiroThinkingStartTag)
+		if emitPart != "" {
+			textEvents = append(textEvents, s.buildTextEvents(emitPart)...)
+		}
+		s.PendingContent = pending
+		break
 	}
 
 	return textEvents, thinkingEvents
+}
+
+func (s *KiroStreamState) buildTextEvents(text string) []ir.UnifiedEvent {
+	var events []ir.UnifiedEvent
+	if text == "" {
+		return events
+	}
+
+	cleanContent, embeddedTools := ParseEmbeddedToolCalls(text)
+	if cleanContent != "" {
+		s.AccumulatedContent += cleanContent
+		events = append(events, ir.UnifiedEvent{
+			Type:    ir.EventTypeToken,
+			Content: cleanContent,
+		})
+	}
+
+	for _, tc := range embeddedTools {
+		if !s.hasToolCall(tc.ID) {
+			s.ToolCalls = append(s.ToolCalls, tc)
+			tcCopy := tc
+			events = append(events, ir.UnifiedEvent{
+				Type:     ir.EventTypeToolCall,
+				ToolCall: &tcCopy,
+			})
+		}
+	}
+
+	return events
+}
+
+func splitPotentialTagSuffix(content, fullTag string) (emit, pending string) {
+	maxSuffix := len(fullTag) - 1
+	if maxSuffix <= 0 || len(content) == 0 {
+		return content, ""
+	}
+	if len(content) < maxSuffix {
+		maxSuffix = len(content)
+	}
+
+	for suffixLen := maxSuffix; suffixLen >= 1; suffixLen-- {
+		prefix := fullTag[:suffixLen]
+		if strings.HasSuffix(content, prefix) {
+			return content[:len(content)-suffixLen], content[len(content)-suffixLen:]
+		}
+	}
+	return content, ""
+}
+
+// FlushPendingContent flushes buffered partial-tag suffixes at stream end.
+func (s *KiroStreamState) FlushPendingContent() []ir.UnifiedEvent {
+	if s.PendingContent == "" {
+		return nil
+	}
+
+	pending := s.PendingContent
+	s.PendingContent = ""
+
+	if s.InThinkingBlock {
+		s.AccumulatedThinking += pending
+		return []ir.UnifiedEvent{{
+			Type:      ir.EventTypeReasoning,
+			Reasoning: pending,
+		}}
+	}
+
+	return s.buildTextEvents(pending)
 }
 
 func (s *KiroStreamState) hasToolCall(id string) bool {

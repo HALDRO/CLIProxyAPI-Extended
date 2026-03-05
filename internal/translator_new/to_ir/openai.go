@@ -567,10 +567,24 @@ func ParseOpenAIChunk(rawJSON []byte) ([]ir.UnifiedEvent, error) {
 	for _, tc := range delta.Get("tool_calls").Array() {
 		// Use the index field from the tool_call if present, otherwise default to 0
 		tcIndex := int(tc.Get("index").Int())
+		tcID := tc.Get("id").String()
+		tcName := tc.Get("function.name").String()
+		tcArgs := tc.Get("function.arguments").String()
+
+		// Determine event type: if chunk has id or name, it's a new tool call header;
+		// otherwise it's a delta (continuation of arguments for an existing tool call).
+		// Some providers (e.g. Kilo/OpenRouter via minimax) incorrectly increment the
+		// index field for argument continuation chunks, which causes downstream clients
+		// to interpret them as separate tool calls and fail with "Expected 'id' to be a string".
+		evType := ir.EventTypeToolCall
+		if tcID == "" && tcName == "" {
+			evType = ir.EventTypeToolCallDelta
+		}
+
 		events = append(events, ir.UnifiedEvent{
-			Type: ir.EventTypeToolCall,
+			Type: evType,
 			ToolCall: &ir.ToolCall{
-				ID: tc.Get("id").String(), Name: tc.Get("function.name").String(), Args: tc.Get("function.arguments").String(),
+				ID: tcID, Name: tcName, Args: tcArgs,
 			},
 			ToolCallIndex: tcIndex,
 		})

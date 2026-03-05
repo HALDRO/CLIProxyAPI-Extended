@@ -33,27 +33,29 @@ type ClaudeProvider struct{}
 
 // ClaudeStreamState tracks state for streaming response conversion.
 type ClaudeStreamState struct {
-	MessageID             string
-	Model                 string
-	SessionID             string
-	CurrentThinkingText   strings.Builder
-	TextBlockIndex        int
-	ToolBlockCount        int
-	CurrentToolBlockIndex int
-	MessageStartSent      bool
-	TextBlockStarted      bool
-	TextBlockStopped      bool
-	HasToolCalls          bool
-	HasContent            bool
-	FinishSent            bool
+	MessageID              string
+	Model                  string
+	SessionID              string
+	CurrentThinkingText    strings.Builder
+	TextBlockIndex         int
+	NextContentBlockIndex  int
+	ActiveContentBlockType string
+	ToolBlockCount         int
+	CurrentToolBlockIndex  int
+	MessageStartSent       bool
+	TextBlockStarted       bool
+	TextBlockStopped       bool
+	HasToolCalls           bool
+	HasContent             bool
+	FinishSent             bool
 }
 
 func NewClaudeStreamState() *ClaudeStreamState {
-	return &ClaudeStreamState{TextBlockIndex: 0, ToolBlockCount: 0}
+	return &ClaudeStreamState{TextBlockIndex: 0, NextContentBlockIndex: 0, ToolBlockCount: 0}
 }
 
 func NewClaudeStreamStateWithSessionID(sessionID string) *ClaudeStreamState {
-	return &ClaudeStreamState{TextBlockIndex: 0, ToolBlockCount: 0, SessionID: sessionID}
+	return &ClaudeStreamState{TextBlockIndex: 0, NextContentBlockIndex: 0, ToolBlockCount: 0, SessionID: sessionID}
 }
 
 // DeriveSessionID generates a stable session ID from the request.
@@ -399,18 +401,59 @@ func formatSSE(eventType string, data interface{}) string {
 	return fmt.Sprintf("event: %s\ndata: %s\n\n", eventType, string(jsonData))
 }
 
+func ensureContentBlock(state *ClaudeStreamState, blockType string) string {
+	if state == nil {
+		return ""
+	}
+
+	var result strings.Builder
+	buildBlock := func(idx int, typ string) {
+		contentBlock := map[string]interface{}{"type": typ}
+		if typ == ir.ClaudeBlockThinking {
+			contentBlock["thinking"] = ""
+		} else {
+			contentBlock["text"] = ""
+		}
+		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStart, map[string]interface{}{
+			"type":          ir.ClaudeSSEContentBlockStart,
+			"index":         idx,
+			"content_block": contentBlock,
+		}))
+	}
+
+	if !state.TextBlockStarted || state.TextBlockStopped {
+		state.TextBlockIndex = state.NextContentBlockIndex
+		state.NextContentBlockIndex++
+		state.TextBlockStarted = true
+		state.TextBlockStopped = false
+		state.ActiveContentBlockType = blockType
+		buildBlock(state.TextBlockIndex, blockType)
+		return result.String()
+	}
+
+	if state.ActiveContentBlockType != blockType {
+		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]interface{}{
+			"type":  ir.ClaudeSSEContentBlockStop,
+			"index": state.TextBlockIndex,
+		}))
+		state.TextBlockStopped = true
+
+		state.TextBlockIndex = state.NextContentBlockIndex
+		state.NextContentBlockIndex++
+		state.TextBlockStopped = false
+		state.ActiveContentBlockType = blockType
+		buildBlock(state.TextBlockIndex, blockType)
+	}
+
+	return result.String()
+}
+
 func emitTextDelta(text string, state *ClaudeStreamState) string {
 	var result strings.Builder
 	idx := 0
 	if state != nil {
+		result.WriteString(ensureContentBlock(state, ir.ClaudeBlockText))
 		idx = state.TextBlockIndex
-		if !state.TextBlockStarted {
-			state.TextBlockStarted = true
-			result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStart, map[string]interface{}{
-				"type": ir.ClaudeSSEContentBlockStart, "index": idx,
-				"content_block": map[string]interface{}{"type": ir.ClaudeBlockText, "text": ""},
-			}))
-		}
 		state.HasContent = true
 	}
 	result.WriteString(formatSSE(ir.ClaudeSSEContentBlockDelta, map[string]interface{}{
@@ -424,14 +467,8 @@ func emitThinkingDelta(thinking string, state *ClaudeStreamState) string {
 	var result strings.Builder
 	idx := 0
 	if state != nil {
+		result.WriteString(ensureContentBlock(state, ir.ClaudeBlockThinking))
 		idx = state.TextBlockIndex
-		if !state.TextBlockStarted {
-			state.TextBlockStarted = true
-			result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStart, map[string]interface{}{
-				"type": ir.ClaudeSSEContentBlockStart, "index": idx,
-				"content_block": map[string]interface{}{"type": ir.ClaudeBlockThinking, "thinking": ""},
-			}))
-		}
 		state.HasContent = true
 		state.CurrentThinkingText.WriteString(thinking)
 	}
@@ -446,14 +483,8 @@ func emitSignatureDelta(signature string, state *ClaudeStreamState) string {
 	var result strings.Builder
 	idx := 0
 	if state != nil {
+		result.WriteString(ensureContentBlock(state, ir.ClaudeBlockThinking))
 		idx = state.TextBlockIndex
-		if !state.TextBlockStarted {
-			state.TextBlockStarted = true
-			result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStart, map[string]interface{}{
-				"type": ir.ClaudeSSEContentBlockStart, "index": idx,
-				"content_block": map[string]interface{}{"type": ir.ClaudeBlockThinking, "thinking": ""},
-			}))
-		}
 		state.HasContent = true
 
 		if state.SessionID != "" && state.CurrentThinkingText.Len() > 0 {
@@ -472,16 +503,19 @@ func emitSignatureDelta(signature string, state *ClaudeStreamState) string {
 func emitToolCall(tc *ir.ToolCall, state *ClaudeStreamState) string {
 	var result strings.Builder
 
-	// Claude API requires index:0 text block to exist before tool_use blocks
-	// If no text block was started, emit an empty one first
+	// Claude API requires an initial content block before tool_use blocks.
 	if state != nil && !state.TextBlockStarted {
+		emptyIdx := state.NextContentBlockIndex
+		state.NextContentBlockIndex++
 		state.TextBlockStarted = true
+		state.TextBlockStopped = true
+		state.ActiveContentBlockType = ir.ClaudeBlockText
+		state.TextBlockIndex = emptyIdx
 		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStart, map[string]interface{}{
-			"type": ir.ClaudeSSEContentBlockStart, "index": state.TextBlockIndex,
+			"type": ir.ClaudeSSEContentBlockStart, "index": emptyIdx,
 			"content_block": map[string]interface{}{"type": ir.ClaudeBlockText, "text": ""},
 		}))
-		state.TextBlockStopped = true
-		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]interface{}{"type": ir.ClaudeSSEContentBlockStop, "index": state.TextBlockIndex}))
+		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]interface{}{"type": ir.ClaudeSSEContentBlockStop, "index": emptyIdx}))
 	} else if state != nil && state.TextBlockStarted && !state.TextBlockStopped {
 		state.TextBlockStopped = true
 		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]interface{}{"type": ir.ClaudeSSEContentBlockStop, "index": state.TextBlockIndex}))
@@ -491,7 +525,8 @@ func emitToolCall(tc *ir.ToolCall, state *ClaudeStreamState) string {
 	if state != nil {
 		state.HasToolCalls = true
 		state.HasContent = true
-		idx = 1 + state.ToolBlockCount
+		idx = state.NextContentBlockIndex
+		state.NextContentBlockIndex++
 		state.ToolBlockCount++
 		state.CurrentToolBlockIndex = idx
 	}
@@ -552,13 +587,21 @@ func emitFinish(usage *ir.Usage, finishReason ir.FinishReason, state *ClaudeStre
 	}
 
 	var result strings.Builder
+	if state != nil && state.TextBlockStarted && !state.TextBlockStopped {
+		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]interface{}{
+			"type":  ir.ClaudeSSEContentBlockStop,
+			"index": state.TextBlockIndex,
+		}))
+		state.TextBlockStopped = true
+	}
+
 	stopReason := ir.ClaudeStopEndTurn
 	if state != nil && state.HasToolCalls {
 		stopReason = ir.ClaudeStopToolUse
 	} else if finishReason == ir.FinishReasonLength {
 		stopReason = ir.ClaudeStopMaxTokens
 	}
-	
+
 	delta := map[string]interface{}{"type": ir.ClaudeSSEMessageDelta, "delta": map[string]interface{}{"stop_reason": stopReason}}
 	if usage != nil {
 		delta["usage"] = map[string]interface{}{"input_tokens": usage.PromptTokens, "output_tokens": usage.CompletionTokens}

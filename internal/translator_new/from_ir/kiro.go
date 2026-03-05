@@ -116,10 +116,10 @@ func (p *KiroProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, error
 
 	systemPrompt := extractSystemPrompt(req.Messages)
 
-	// Inject thinking mode configuration if present
-	// Kiro/Amazon Q supports official thinking mode via <thinking_mode> tag in system prompt
-	// Keep max_thinking_length conservative to reserve space for tool outputs and avoid truncation.
-	if req.Thinking != nil && (req.Thinking.IncludeThoughts || req.Thinking.Budget > 0) {
+	// Inject thinking mode configuration if present.
+	// Kiro/Amazon Q supports official thinking mode via <thinking_mode> tag in system prompt.
+	// Avoid duplicate injection when client already provided thinking tags.
+	if req.Thinking != nil && (req.Thinking.IncludeThoughts || req.Thinking.Budget > 0) && !hasThinkingConfigTags(systemPrompt) {
 		thinkingHint := `<thinking_mode>enabled</thinking_mode>
 <max_thinking_length>16000</max_thinking_length>`
 		if systemPrompt != "" {
@@ -254,6 +254,10 @@ func extractSystemPrompt(messages []ir.Message) string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+func hasThinkingConfigTags(prompt string) bool {
+	return strings.Contains(prompt, "<thinking_mode>") || strings.Contains(prompt, "<max_thinking_length>")
 }
 
 const kiroMaxHistoryMessages = 999
