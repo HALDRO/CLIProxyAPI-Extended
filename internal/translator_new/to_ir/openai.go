@@ -90,13 +90,13 @@ func ParseOpenAIRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 				}
 				continue
 			}
-			
+
 			// Handle code_execution extension
 			if ce := t.Get("code_execution"); ce.Exists() {
 				addGoogleTool(req, "codeExecution", ce.Value())
 				continue
 			}
-			
+
 			// Handle url_context extension (grounding)
 			if uc := t.Get("url_context"); uc.Exists() {
 				addGoogleTool(req, "urlContext", uc.Value())
@@ -137,6 +137,19 @@ func ParseOpenAIRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 	}
 
 	req.Thinking = parseOpenAIThinkingConfig(root)
+
+	// Let user-provided generationConfig pass through to Gemini-family targets.
+	// This allows clients to send Gemini-native fields (e.g. thinkingConfig, responseMimeType)
+	// directly through OpenAI-compatible endpoints.
+	if genConfig := root.Get("generationConfig"); genConfig.Exists() {
+		if req.Metadata == nil {
+			req.Metadata = make(map[string]any)
+		}
+		var gc map[string]interface{}
+		if json.Unmarshal([]byte(genConfig.Raw), &gc) == nil {
+			req.Metadata["generationConfig"] = gc
+		}
+	}
 
 	// Response Format (Structured Output)
 	if rf := root.Get("response_format"); rf.Exists() {
@@ -824,13 +837,23 @@ func parseOpenAIContentPart(item gjson.Result, msg *ir.Message) *ir.ContentPart 
 	case "file":
 		filename := item.Get("file.filename").String()
 		fileData := item.Get("file.file_data").String()
-		if filename != "" && fileData != "" {
-			ext := ""
-			if idx := strings.LastIndex(filename, "."); idx >= 0 && idx < len(filename)-1 {
-				ext = filename[idx+1:]
+		if fileData != "" {
+			// Try to detect image by file extension first
+			if filename != "" {
+				ext := ""
+				if idx := strings.LastIndex(filename, "."); idx >= 0 && idx < len(filename)-1 {
+					ext = filename[idx+1:]
+				}
+				if mimeType, ok := misc.MimeTypes[ext]; ok {
+					return &ir.ContentPart{Type: ir.ContentTypeImage, Image: &ir.ImagePart{MimeType: mimeType, Data: fileData}}
+				}
 			}
-			if mimeType, ok := misc.MimeTypes[ext]; ok {
-				return &ir.ContentPart{Type: ir.ContentTypeImage, Image: &ir.ImagePart{MimeType: mimeType, Data: fileData}}
+			// Fallback: handle data URI files (e.g. data:application/pdf;base64,...) as documents.
+			// This matches upstream behavior where non-image files are converted to Claude document blocks.
+			if strings.HasPrefix(fileData, "data:") {
+				return &ir.ContentPart{Type: ir.ContentTypeFile, File: &ir.FilePart{
+					Filename: filename, FileData: fileData,
+				}}
 			}
 		}
 	case "tool_use":
@@ -965,11 +988,13 @@ func parseOpenAIThinkingConfig(root gjson.Result) *ir.ThinkingConfig {
 		}
 	}
 
-	// Anthropic/Claude API format: thinking.type == "enabled" with budget_tokens
+	// Anthropic/Claude API format: thinking.type with budget_tokens or output_config.effort
 	// This allows Claude Code and other Claude API clients to pass thinking configuration
 	// through OpenAI-compatible endpoints
 	if t := root.Get("thinking"); t.Exists() && t.IsObject() {
-		if t.Get("type").String() == "enabled" {
+		thinkingType := t.Get("type").String()
+		switch thinkingType {
+		case "enabled":
 			if thinking == nil {
 				thinking = &ir.ThinkingConfig{}
 			}
@@ -979,7 +1004,20 @@ func parseOpenAIThinkingConfig(root gjson.Result) *ir.ThinkingConfig {
 			} else {
 				thinking.Budget = -1 // Auto
 			}
-		} else if t.Get("type").String() == "disabled" {
+		case "adaptive", "auto":
+			// Claude adaptive/auto thinking with optional output_config.effort.
+			if thinking == nil {
+				thinking = &ir.ThinkingConfig{}
+			}
+			thinking.IncludeThoughts = true
+			thinking.Budget = -1 // Auto
+			if effort := root.Get("output_config.effort"); effort.Exists() && effort.Type == gjson.String {
+				effortStr := strings.ToLower(strings.TrimSpace(effort.String()))
+				if effortStr != "" {
+					thinking.Effort = effortStr
+				}
+			}
+		case "disabled":
 			thinking = &ir.ThinkingConfig{IncludeThoughts: false, Budget: 0}
 		}
 	}

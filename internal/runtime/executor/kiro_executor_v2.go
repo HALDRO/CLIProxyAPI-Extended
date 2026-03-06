@@ -57,10 +57,6 @@ const (
 	kiroSocketBaseRetryDelayV2 = 1 * time.Second
 	kiroSocketMaxRetryDelayV2  = 30 * time.Second
 
-	// User-Agent strings (CLI style for non-IDC auth)
-	kiroUserAgentV2     = "aws-sdk-rust/1.3.9 os/macos lang/rust/1.87.0"
-	kiroFullUserAgentV2 = "aws-sdk-rust/1.3.9 ua/2.1 api/ssooidc/1.88.0 os/macos lang/rust/1.87.0 m/E app/AmazonQ-For-CLI"
-
 	// Kiro API headers
 	// Q endpoint uses plain JSON.
 	kiroContentTypeV2 = "application/json"
@@ -153,19 +149,8 @@ var retryableHTTPStatusCodesV2 = map[int]bool{
 	504: true,
 }
 
-// Global FingerprintManager for dynamic User-Agent generation per token
-var (
-	globalFingerprintManagerV2     *kiroauth.FingerprintManager
-	globalFingerprintManagerOnceV2 sync.Once
-)
-
-func getGlobalFingerprintManagerV2() *kiroauth.FingerprintManager {
-	globalFingerprintManagerOnceV2.Do(func() {
-		globalFingerprintManagerV2 = kiroauth.NewFingerprintManager()
-		log.Infof("kiro-v2: initialized global FingerprintManager for dynamic UA generation")
-	})
-	return globalFingerprintManagerV2
-}
+// kiroIDEAgentModeV2 is the agent mode header value for Kiro IDE requests.
+const kiroIDEAgentModeV2 = "vibe"
 
 // Global pooled HTTP client for connection reuse
 var (
@@ -279,45 +264,53 @@ func calculateRetryDelayV2(attempt int) time.Duration {
 	return kiroauth.ExponentialBackoffWithJitter(attempt, cfg.BaseDelay, cfg.MaxDelay)
 }
 
-// getTokenKeyV2 returns a unique key for rate limiting based on auth credentials.
-func getTokenKeyV2(auth *coreauth.Auth) string {
+// getAccountKeyV2 returns a stable account key for fingerprint lookup and rate limiting.
+// Fallback order: client_id/refresh_token → auth.ID → profile_arn → access_token → anonymous.
+func getAccountKeyV2(auth *coreauth.Auth) string {
+	var clientID, refreshToken, profileArn string
+	if auth != nil && auth.Metadata != nil {
+		clientID, _ = auth.Metadata["client_id"].(string)
+		refreshToken, _ = auth.Metadata["refresh_token"].(string)
+		profileArn, _ = auth.Metadata["profile_arn"].(string)
+	}
+	if clientID != "" || refreshToken != "" {
+		return kiroauth.GetAccountKey(clientID, refreshToken)
+	}
 	if auth != nil && auth.ID != "" {
-		return auth.ID
+		return kiroauth.GenerateAccountKey(auth.ID)
 	}
-	token := getMetaString(auth.Metadata, "access_token", "accessToken")
-	if len(token) > 16 {
-		return token[:16]
+	if profileArn != "" {
+		return kiroauth.GenerateAccountKey(profileArn)
 	}
-	return token
+	if accessToken := getMetaString(auth.Metadata, "access_token", "accessToken"); accessToken != "" {
+		return kiroauth.GenerateAccountKey(accessToken)
+	}
+	return kiroauth.GenerateAccountKey("kiro-anonymous")
 }
 
-// isIDCAuthV2 checks if the auth uses IDC (Identity Center) authentication.
-func isIDCAuthV2(auth *coreauth.Auth) bool {
-	if auth == nil || auth.Metadata == nil {
-		return false
-	}
-	authMethod, _ := auth.Metadata["auth_method"].(string)
-	return strings.ToLower(authMethod) == "idc"
-}
-
-// applyDynamicFingerprintV2 applies token-specific fingerprint headers to the request.
-// IDC auth gets dynamic UA, others get static Amazon Q CLI style headers.
+// applyDynamicFingerprintV2 applies account-specific fingerprint headers to the request.
+// All auth types use dynamic fingerprint via GlobalFingerprintManager.
 func applyDynamicFingerprintV2(req *http.Request, auth *coreauth.Auth) {
-	if isIDCAuthV2(auth) {
-		tokenKey := getTokenKeyV2(auth)
-		fp := getGlobalFingerprintManagerV2().GetFingerprint(tokenKey)
-		req.Header.Set("User-Agent", fp.BuildUserAgent())
-		req.Header.Set("X-Amz-User-Agent", fp.BuildAmzUserAgent())
-		log.Debugf("kiro-v2: dynamic fingerprint for token %s...", tokenKey[:min(8, len(tokenKey))])
-	} else {
-		req.Header.Set("User-Agent", kiroUserAgentV2)
-		req.Header.Set("X-Amz-User-Agent", kiroFullUserAgentV2)
+	accountKey := getAccountKeyV2(auth)
+	fp := kiroauth.GlobalFingerprintManager().GetFingerprint(accountKey)
+
+	req.Header.Set("User-Agent", fp.BuildUserAgent())
+	req.Header.Set("X-Amz-User-Agent", fp.BuildAmzUserAgent())
+	req.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentModeV2)
+	req.Header.Set("x-amzn-codewhisperer-optout", "true")
+
+	keyPrefix := accountKey
+	if len(keyPrefix) > 8 {
+		keyPrefix = keyPrefix[:8]
 	}
+	log.Debugf("kiro-v2: using dynamic fingerprint for account %s... (SDK:%s, OS:%s/%s, Kiro:%s)",
+		keyPrefix, fp.StreamingSDKVersion, fp.OSType, fp.OSVersion, fp.KiroVersion)
 }
 
 type KiroExecutorV2 struct {
-	cfg       *config.Config
-	refreshMu sync.Mutex // Serializes token refresh operations
+	cfg          *config.Config
+	refreshMu    sync.Mutex // Serializes token refresh operations
+	profileArnMu sync.Mutex // Serializes profileArn fetches to prevent concurrent map writes
 }
 
 func NewKiroExecutorV2(cfg *config.Config) *KiroExecutorV2 {
@@ -536,6 +529,46 @@ func (e *KiroExecutorV2) Refresh(ctx context.Context, auth *coreauth.Auth) (*cor
 	return updatedAuth, nil
 }
 
+// fetchAndSaveProfileArnV2 fetches profileArn from API if missing, updates auth and persists.
+func (e *KiroExecutorV2) fetchAndSaveProfileArnV2(ctx context.Context, auth *coreauth.Auth, accessToken string) string {
+	if auth == nil || auth.Metadata == nil {
+		return ""
+	}
+
+	// Skip for Builder ID — they don't have profiles
+	if authMethod, ok := auth.Metadata["auth_method"].(string); ok && authMethod == "builder-id" {
+		log.Debugf("kiro-v2: skipping profileArn fetch for builder-id auth")
+		return ""
+	}
+
+	e.profileArnMu.Lock()
+	defer e.profileArnMu.Unlock()
+
+	// Double-check: another goroutine may have already fetched and saved the profileArn
+	if arn, ok := auth.Metadata["profile_arn"].(string); ok && arn != "" {
+		return arn
+	}
+
+	clientID, _ := auth.Metadata["client_id"].(string)
+	refreshToken, _ := auth.Metadata["refresh_token"].(string)
+
+	ssoClient := kiroauth.NewSSOOIDCClient(e.cfg)
+	profileArn := ssoClient.FetchProfileArn(ctx, accessToken, clientID, refreshToken)
+	if profileArn == "" {
+		log.Debugf("kiro-v2: FetchProfileArn returned no profiles")
+		return ""
+	}
+
+	auth.Metadata["profile_arn"] = profileArn
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes["profile_arn"] = profileArn
+
+	log.Infof("kiro-v2: fetched and saved profileArn: %s", profileArn)
+	return profileArn
+}
+
 type requestContext struct {
 	ctx          context.Context
 	auth         *coreauth.Auth
@@ -575,7 +608,7 @@ func (e *KiroExecutorV2) prepareRequest(ctx context.Context, auth *coreauth.Auth
 	}
 
 	rc.kiroModelID = mapModelID(req.Model)
-	rc.tokenKey = getTokenKeyV2(rc.auth)
+	rc.tokenKey = getAccountKeyV2(rc.auth)
 
 	// Parse request based on source format
 	sanitizedPayload := []byte(ir.SanitizeText(string(req.Payload)))
@@ -600,11 +633,17 @@ func (e *KiroExecutorV2) prepareRequest(ctx context.Context, auth *coreauth.Auth
 		rc.irReq.Metadata = make(map[string]any)
 	}
 
-	// Set profile ARN (only for social auth; AWS SSO OIDC must NOT send it)
-	if arn := getMetaString(rc.auth.Metadata, "profile_arn", "profileArn"); arn != "" {
-		if shouldSendProfileArn(rc.auth) {
-			rc.irReq.Metadata["profileArn"] = arn
+	// Fetch profileArn if missing (for imported accounts from Kiro IDE)
+	profileArn := getMetaString(rc.auth.Metadata, "profile_arn", "profileArn")
+	if profileArn == "" {
+		if fetched := e.fetchAndSaveProfileArnV2(ctx, rc.auth, rc.token); fetched != "" {
+			profileArn = fetched
 		}
+	}
+
+	// Set profile ARN (builder-id and aws_sso_oidc must NOT send it)
+	if profileArn != "" && shouldSendProfileArn(rc.auth) {
+		rc.irReq.Metadata["profileArn"] = profileArn
 	}
 
 	// Preserve origin for quota routing (CLI vs AI_EDITOR) in Kiro request body.
@@ -806,7 +845,7 @@ func (e *KiroExecutorV2) executeWithRetry(rc *requestContext) (cliproxyexecutor.
 				}
 				rc.auth = refreshedAuth
 				rc.token = getMetaString(refreshedAuth.Metadata, "access_token", "accessToken")
-				rc.tokenKey = getTokenKeyV2(refreshedAuth)
+				rc.tokenKey = getAccountKeyV2(refreshedAuth)
 				continue
 			}
 			return cliproxyexecutor.Response{}, fmt.Errorf("auth error %d: %s", resp.StatusCode, string(body))
@@ -1026,7 +1065,7 @@ func (e *KiroExecutorV2) executeStreamWithRetry(rc *requestContext) (*cliproxyex
 				}
 				rc.auth = refreshedAuth
 				rc.token = getMetaString(refreshedAuth.Metadata, "access_token", "accessToken")
-				rc.tokenKey = getTokenKeyV2(refreshedAuth)
+				rc.tokenKey = getAccountKeyV2(refreshedAuth)
 				continue
 			}
 			return nil, fmt.Errorf("auth error %d: %s", resp.StatusCode, string(body))
@@ -1270,32 +1309,26 @@ func extractRegionFromProfileARNV2(profileArn string) string {
 	return ""
 }
 
+// shouldSendProfileArn suppresses profileArn for builder-id and AWS SSO OIDC auth.
+// IDC auth now sends profileArn (it's required for IDC accounts).
+// Only builder-id and aws_sso_oidc are excluded — sending profileArn causes 403 errors for them.
 func shouldSendProfileArn(auth *coreauth.Auth) bool {
 	if auth == nil || auth.Metadata == nil {
 		return true
 	}
 
-	// Check 1: auth_method field
+	// Check 1: auth_method field, skip for builder-id only
 	if authMethod, ok := auth.Metadata["auth_method"].(string); ok {
-		s := strings.ToLower(strings.TrimSpace(authMethod))
-		if s == "builder-id" || s == "idc" {
+		if strings.ToLower(strings.TrimSpace(authMethod)) == "builder-id" {
 			return false
 		}
 	}
 
-	// Check 2: auth_type field
+	// Check 2: auth_type field (from kiro-cli tokens)
 	if authType, ok := auth.Metadata["auth_type"].(string); ok {
-		s := strings.ToLower(strings.TrimSpace(authType))
-		if s == "aws_sso_oidc" {
+		if strings.ToLower(strings.TrimSpace(authType)) == "aws_sso_oidc" {
 			return false
 		}
-	}
-
-	// Check 3: client_id + client_secret presence
-	_, hasClientID := auth.Metadata["client_id"].(string)
-	_, hasClientSecret := auth.Metadata["client_secret"].(string)
-	if hasClientID && hasClientSecret {
-		return false
 	}
 
 	return true
@@ -1734,11 +1767,8 @@ func (e *KiroExecutorV2) getAPIRegionV2(auth *coreauth.Auth) string {
 
 // getMCPAuthContextV2 extracts fingerprint and auth attributes for MCP calls.
 func (e *KiroExecutorV2) getMCPAuthContextV2(auth *coreauth.Auth, token string) (*kiroauth.Fingerprint, map[string]string) {
-	tokenKey := ""
-	if auth != nil {
-		tokenKey = auth.ID
-	}
-	fp := getGlobalFingerprintManager().GetFingerprint(tokenKey)
+	accountKey := getAccountKeyV2(auth)
+	fp := kiroauth.GlobalFingerprintManager().GetFingerprint(accountKey)
 
 	var authAttrs map[string]string
 	if auth != nil {

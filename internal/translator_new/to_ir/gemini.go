@@ -231,13 +231,15 @@ func parseGeminiUsage(parsed gjson.Result) *ir.Usage {
 	cachedTokens := int(u.Get("cachedContentTokenCount").Int())
 
 	// Adjust prompt tokens to exclude cached tokens.
+	// NOTE: Do NOT add thoughtsTokens to promptTokens — thoughts are output tokens,
+	// not input tokens. This matches upstream behavior where prompt_tokens = promptTokenCount only.
 	promptTokens = promptTokens - cachedTokens
 	if promptTokens < 0 {
 		promptTokens = 0
 	}
 
 	return &ir.Usage{
-		PromptTokens:       promptTokens + thoughtsTokens,
+		PromptTokens:       promptTokens,
 		CompletionTokens:   int(u.Get("candidatesTokenCount").Int()),
 		TotalTokens:        int(u.Get("totalTokenCount").Int()),
 		ThoughtsTokenCount: thoughtsTokens,

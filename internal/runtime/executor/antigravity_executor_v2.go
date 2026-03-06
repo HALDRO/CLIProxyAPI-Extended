@@ -127,7 +127,7 @@ func ensureAntigravityProjectID(ctx context.Context, cfg *config.Config, auth *c
 		return nil
 	}
 
-	client := newProxyAwareHTTPClient(ctx, cfg, auth, 0)
+	client := newAntigravityHTTPClient(ctx, cfg, auth, 0)
 	projectID, errFetch := sdkAuth.FetchAntigravityProjectID(ctx, token, client)
 	if errFetch != nil {
 		return fmt.Errorf("fetch project id: %w", errFetch)
@@ -161,6 +161,9 @@ func (e *AntigravityExecutorV2) PrepareRequest(req *http.Request, auth *cliproxy
 	return nil
 }
 
+// HttpRequest injects Antigravity credentials into the request and executes it.
+// It uses a whitelist approach: all incoming headers are stripped and only
+// the minimum set required by the Antigravity protocol is explicitly set.
 func (e *AntigravityExecutorV2) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
 	if req == nil {
 		return nil, fmt.Errorf("antigravity canonical executor: request is nil")
@@ -169,10 +172,28 @@ func (e *AntigravityExecutorV2) HttpRequest(ctx context.Context, auth *cliproxya
 		ctx = req.Context()
 	}
 	httpReq := req.WithContext(ctx)
+
+	// --- Whitelist: save only the headers we need from the original request ---
+	contentType := httpReq.Header.Get("Content-Type")
+
+	// Wipe ALL incoming headers
+	for k := range httpReq.Header {
+		delete(httpReq.Header, k)
+	}
+
+	// --- Set only the headers Antigravity actually sends ---
+	if contentType != "" {
+		httpReq.Header.Set("Content-Type", contentType)
+	}
+	httpReq.Header.Set("User-Agent", resolveAntigravityUserAgent(auth))
+	httpReq.Close = true // sends Connection: close
+
+	// Inject Authorization: Bearer <token>
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
 		return nil, err
 	}
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+
+	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 	return httpClient.Do(httpReq)
 }
 
@@ -239,7 +260,7 @@ func (e *AntigravityExecutorV2) Execute(ctx context.Context, auth *cliproxyauth.
 
 	_ = buildAntigravityEndpoint(auth, false, opts.Alt)
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 
 	attempts := antigravityRetryAttempts(auth, e.cfg)
 
@@ -259,10 +280,10 @@ attemptLoop:
 			if errReq != nil {
 				return resp, errReq
 			}
+			httpReq.Close = true
 			httpReq.Header.Set("Content-Type", "application/json")
 			httpReq.Header.Set("Authorization", "Bearer "+token)
 			httpReq.Header.Set("User-Agent", resolveAntigravityUserAgent(auth))
-			httpReq.Header.Set("Accept", "application/json")
 			if host := resolveHost(baseURL); host != "" {
 				httpReq.Host = host
 			}
@@ -412,7 +433,7 @@ func (e *AntigravityExecutorV2) ExecuteStream(ctx context.Context, auth *cliprox
 
 	_ = buildAntigravityEndpoint(auth, true, opts.Alt)
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 
 	attempts := antigravityRetryAttempts(auth, e.cfg)
 
@@ -434,10 +455,10 @@ attemptLoop:
 			if errReq != nil {
 				return nil, errReq
 			}
+			httpReq.Close = true
 			httpReq.Header.Set("Content-Type", "application/json")
 			httpReq.Header.Set("Authorization", "Bearer "+token)
 			httpReq.Header.Set("User-Agent", resolveAntigravityUserAgent(auth))
-			httpReq.Header.Set("Accept", "text/event-stream")
 			if host := resolveHost(baseURL); host != "" {
 				httpReq.Host = host
 			}
@@ -673,7 +694,25 @@ func ensureAntigravityMetadata(irReq *ir.UnifiedChatRequest, auth *cliproxyauth.
 		}
 	}
 
-	// request_id: use idempotency_key if present.
+	irReq.Metadata["user_agent"] = resolveAntigravityUserAgent(auth)
+
+	// Detect image model for request_type and request_id format selection.
+	isImageModel := strings.Contains(strings.ToLower(irReq.Model), "image")
+
+	// requestType selection: image_gen for image models, agent for others.
+	if _, ok := irReq.Metadata["request_type"]; !ok {
+		if isImageModel {
+			irReq.Metadata["request_type"] = "image_gen"
+		} else {
+			requestType := "agent"
+			if hasGoogleSearch(irReq) {
+				requestType = "web_search"
+			}
+			irReq.Metadata["request_type"] = requestType
+		}
+	}
+
+	// request_id: image models use image_gen/{timestamp}/{uuid}/12 format.
 	requestID := ""
 	if opts.Metadata != nil {
 		if key, ok := opts.Metadata["idempotency_key"].(string); ok {
@@ -683,30 +722,25 @@ func ensureAntigravityMetadata(irReq *ir.UnifiedChatRequest, auth *cliproxyauth.
 		}
 	}
 	if requestID == "" {
-		requestID = "agent-" + uuid.NewString()
+		if isImageModel {
+			requestID = generateImageGenRequestID()
+		} else {
+			requestID = "agent-" + uuid.NewString()
+		}
 	}
 	irReq.Metadata["request_id"] = requestID
-	irReq.Metadata["user_agent"] = resolveAntigravityUserAgent(auth)
 
-	// session_id: stable hash from original request; fallback to envelope request.sessionId.
-	if sid, ok := irReq.Metadata["session_id"].(string); ok {
-		sessionID = strings.TrimSpace(sid)
-	}
-	if sessionID == "" {
-		sessionID = from_ir.DeriveSessionID(opts.OriginalRequest)
-		if sessionID != "" {
-			irReq.Metadata["session_id"] = sessionID
+	// session_id: only for non-image models. Image models don't use session tracking.
+	if !isImageModel {
+		if sid, ok := irReq.Metadata["session_id"].(string); ok {
+			sessionID = strings.TrimSpace(sid)
 		}
-	}
-
-	// requestType selection: simple mapping, allow override.
-	if _, ok := irReq.Metadata["request_type"]; !ok {
-		requestType := "agent"
-		// Web search intent via networking tools.
-		if hasGoogleSearch(irReq) {
-			requestType = "web_search"
+		if sessionID == "" {
+			sessionID = from_ir.DeriveSessionID(opts.OriginalRequest)
+			if sessionID != "" {
+				irReq.Metadata["session_id"] = sessionID
+			}
 		}
-		irReq.Metadata["request_type"] = requestType
 	}
 
 	if _, ok := irReq.Metadata["raw_request"]; !ok {

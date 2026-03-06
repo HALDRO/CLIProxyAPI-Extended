@@ -144,7 +144,12 @@ func ensureClaudeUser() {
 
 func applyThinkingConfig(root map[string]interface{}, thinking *ir.ThinkingConfig) {
 	t := map[string]interface{}{}
-	if thinking.IncludeThoughts && thinking.Budget != 0 {
+	if thinking.Effort != "" {
+		// Adaptive/auto thinking with explicit effort level (Claude 4.6+).
+		// Emit thinking.type=adaptive + output_config.effort instead of budget_tokens.
+		t["type"] = "adaptive"
+		root["output_config"] = map[string]interface{}{"effort": thinking.Effort}
+	} else if thinking.IncludeThoughts && thinking.Budget != 0 {
 		t["type"] = "enabled"
 		if thinking.Budget > 0 {
 			t["budget_tokens"] = thinking.Budget
@@ -174,11 +179,32 @@ func buildMessages(msgs []ir.Message) []interface{} {
 		case ir.RoleTool:
 			for _, part := range msg.Content {
 				if part.Type == ir.ContentTypeToolResult && part.ToolResult != nil {
+					toolResultBlock := map[string]interface{}{
+						"type": ir.ClaudeBlockToolResult, "tool_use_id": part.ToolResult.ToolCallID, "content": part.ToolResult.Result,
+					}
+					// Include images from tool results as content array with image blocks.
+					if len(part.ToolResult.Images) > 0 {
+						var contentParts []interface{}
+						if part.ToolResult.Result != "" {
+							contentParts = append(contentParts, map[string]interface{}{
+								"type": "text", "text": part.ToolResult.Result,
+							})
+						}
+						for _, img := range part.ToolResult.Images {
+							contentParts = append(contentParts, map[string]interface{}{
+								"type": "image",
+								"source": map[string]interface{}{
+									"type":       "base64",
+									"media_type": img.MimeType,
+									"data":       img.Data,
+								},
+							})
+						}
+						toolResultBlock["content"] = contentParts
+					}
 					messages = append(messages, map[string]interface{}{
-						"role": ir.ClaudeRoleUser,
-						"content": []interface{}{map[string]interface{}{
-							"type": ir.ClaudeBlockToolResult, "tool_use_id": part.ToolResult.ToolCallID, "content": part.ToolResult.Result,
-						}},
+						"role":    ir.ClaudeRoleUser,
+						"content": []interface{}{toolResultBlock},
 					})
 				}
 			}
@@ -341,11 +367,57 @@ func buildClaudeContentParts(msg ir.Message, includeToolCalls bool) []interface{
 					"source": map[string]interface{}{"type": "base64", "media_type": p.Image.MimeType, "data": p.Image.Data},
 				})
 			}
+		case ir.ContentTypeFile:
+			// Convert file content to Claude document format.
+			// Supports data URI format (data:application/pdf;base64,...) and raw base64.
+			if p.File != nil && p.File.FileData != "" {
+				mediaType := "application/octet-stream"
+				data := p.File.FileData
+				if strings.HasPrefix(p.File.FileData, "data:") {
+					trimmed := strings.TrimPrefix(p.File.FileData, "data:")
+					mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
+					if len(mediaAndData) == 2 {
+						if mediaAndData[0] != "" {
+							mediaType = mediaAndData[0]
+						}
+						data = mediaAndData[1]
+					}
+				}
+				parts = append(parts, map[string]interface{}{
+					"type": "document",
+					"source": map[string]interface{}{
+						"type":       "base64",
+						"media_type": mediaType,
+						"data":       data,
+					},
+				})
+			}
 		case ir.ContentTypeToolResult:
 			if p.ToolResult != nil {
-				parts = append(parts, map[string]interface{}{
+				toolResultBlock := map[string]interface{}{
 					"type": ir.ClaudeBlockToolResult, "tool_use_id": p.ToolResult.ToolCallID, "content": p.ToolResult.Result,
-				})
+				}
+				// Include images from tool results as content array with image blocks.
+				if len(p.ToolResult.Images) > 0 {
+					var contentParts []interface{}
+					if p.ToolResult.Result != "" {
+						contentParts = append(contentParts, map[string]interface{}{
+							"type": "text", "text": p.ToolResult.Result,
+						})
+					}
+					for _, img := range p.ToolResult.Images {
+						contentParts = append(contentParts, map[string]interface{}{
+							"type": "image",
+							"source": map[string]interface{}{
+								"type":       "base64",
+								"media_type": img.MimeType,
+								"data":       img.Data,
+							},
+						})
+					}
+					toolResultBlock["content"] = contentParts
+				}
+				parts = append(parts, toolResultBlock)
 			}
 		}
 	}

@@ -48,6 +48,16 @@ func (p *GeminiProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, err
 func (p *GeminiProvider) applyGenerationConfig(root map[string]interface{}, req *ir.UnifiedChatRequest) error {
 	genConfig := make(map[string]interface{})
 
+	// Let user-provided generationConfig pass through first.
+	// Our explicit settings below will override any conflicting keys.
+	if req.Metadata != nil {
+		if gc, ok := req.Metadata["generationConfig"].(map[string]interface{}); ok {
+			for k, v := range gc {
+				genConfig[k] = v
+			}
+		}
+	}
+
 	if req.Temperature != nil {
 		genConfig["temperature"] = *req.Temperature
 	}
@@ -409,10 +419,25 @@ func (p *GeminiProvider) applyToolResponses(contents *[]interface{}, toolCallIDs
 		responseObj := parseResultJSON(resultPart.Result)
 		funcResp["response"] = responseObj
 
-		// Handle multimodal results logic if needed (currently simplistic)
-		// For now, ignoring images/files in functionResponse structure complexity
-		// as implementation details for "inlineData" inside functionResponse are tricky.
-		// Keeping it simple as per original logic structure but cleaner.
+		// Place image data inside functionResponse.parts as inlineData
+		// instead of as sibling parts in the outer content, to avoid
+		// base64 data bloating the text context.
+		if len(resultPart.Images) > 0 {
+			var imageParts []interface{}
+			for _, img := range resultPart.Images {
+				inlineData := map[string]interface{}{}
+				if img.MimeType != "" {
+					inlineData["mimeType"] = img.MimeType
+				}
+				if img.Data != "" {
+					inlineData["data"] = img.Data
+				}
+				imageParts = append(imageParts, map[string]interface{}{
+					"inlineData": inlineData,
+				})
+			}
+			funcResp["parts"] = imageParts
+		}
 
 		part := map[string]interface{}{
 			"functionResponse": funcResp,
@@ -527,7 +552,7 @@ func (p *GeminiProvider) applyTools(root map[string]interface{}, req *ir.Unified
 	} else if googleSearch != nil {
 		tools = append(tools, map[string]interface{}{"googleSearch": googleSearch})
 	}
-	
+
 	// Add extra Google tools (codeExecution, urlContext)
 	// These can typically exist alongside functionDeclarations in newer API versions
 	if len(extraTools) > 0 {

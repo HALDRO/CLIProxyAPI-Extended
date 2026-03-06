@@ -141,11 +141,18 @@ func ParseClaudeRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 			} else {
 				req.Thinking.Budget = -1 // Auto
 			}
-		case "adaptive":
-			// Claude adaptive means "enable with max capacity".
-			// Map to IncludeThoughts + auto budget; each from_ir provider resolves
-			// this to its model-specific max capability.
+		case "adaptive", "auto":
+			// Claude adaptive/auto means "enable with max capacity".
+			// If output_config.effort is present, pass it through as Effort.
+			// Otherwise map to IncludeThoughts + auto budget; each from_ir provider
+			// resolves this to its model-specific max capability.
 			req.Thinking = &ir.ThinkingConfig{IncludeThoughts: true, Budget: -1}
+			if effort := parsed.Get("output_config.effort"); effort.Exists() && effort.Type == gjson.String {
+				effortStr := strings.ToLower(strings.TrimSpace(effort.String()))
+				if effortStr != "" {
+					req.Thinking.Effort = effortStr
+				}
+			}
 		case "disabled":
 			req.Thinking = &ir.ThinkingConfig{IncludeThoughts: false, Budget: 0}
 		}
@@ -199,7 +206,7 @@ func parseClaudeMessage(m gjson.Result) ir.Message {
 			case "image":
 				if source := block.Get("source"); source.Exists() && source.Get("type").String() == "base64" {
 					msg.Content = append(msg.Content, ir.ContentPart{
-						Type: ir.ContentTypeImage,
+						Type:  ir.ContentTypeImage,
 						Image: &ir.ImagePart{MimeType: source.Get("media_type").String(), Data: source.Get("data").String()},
 					})
 				}
@@ -214,22 +221,44 @@ func parseClaudeMessage(m gjson.Result) ir.Message {
 			case "tool_result":
 				resultContent := block.Get("content")
 				var resultStr string
+				var images []*ir.ImagePart
 				if resultContent.Type == gjson.String {
 					resultStr = resultContent.String()
 				} else if resultContent.IsArray() {
 					var parts []string
 					for _, part := range resultContent.Array() {
-						if part.Get("type").String() == "text" {
+						partType := part.Get("type").String()
+						if partType == "text" {
 							parts = append(parts, part.Get("text").String())
+						} else if partType == "image" {
+							// Extract base64 images from tool_result content.
+							// These are placed into ToolResultPart.Images so that
+							// from_ir emitters can embed them as inlineData inside
+							// functionResponse.parts (avoiding base64 context bloat).
+							source := part.Get("source")
+							if source.Exists() && source.Get("type").String() == "base64" {
+								img := &ir.ImagePart{}
+								if mt := source.Get("media_type").String(); mt != "" {
+									img.MimeType = mt
+								}
+								if d := source.Get("data").String(); d != "" {
+									img.Data = d
+								}
+								images = append(images, img)
+							}
 						}
 					}
 					resultStr = strings.Join(parts, "\n")
 				} else {
 					resultStr = resultContent.Raw
 				}
+				toolResult := &ir.ToolResultPart{ToolCallID: block.Get("tool_use_id").String(), Result: resultStr}
+				if len(images) > 0 {
+					toolResult.Images = images
+				}
 				msg.Content = append(msg.Content, ir.ContentPart{
-					Type: ir.ContentTypeToolResult,
-					ToolResult: &ir.ToolResultPart{ToolCallID: block.Get("tool_use_id").String(), Result: resultStr},
+					Type:       ir.ContentTypeToolResult,
+					ToolResult: toolResult,
 				})
 			}
 		}

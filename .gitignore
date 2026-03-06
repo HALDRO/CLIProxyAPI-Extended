@@ -51,6 +51,7 @@ log_analyzer.go
 _bmad/*
 _bmad-output/*
 .mcp/cache/
+opencode.json
 
 # Local data (fork-specific)
 /auth/
