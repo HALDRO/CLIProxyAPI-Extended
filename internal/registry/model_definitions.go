@@ -23,7 +23,6 @@ import (
 //   - kiro
 //   - kilo
 //   - github-copilot
-//   - kiro
 //   - amazonq
 //   - antigravity (returns static overrides only)
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
@@ -152,6 +151,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "OpenAI GPT-4.1 via GitHub Copilot",
 			ContextLength:       128000,
 			MaxCompletionTokens: 16384,
+			SupportedEndpoints:  []string{"/chat/completions", "/responses"},
 		},
 	}
 
@@ -166,6 +166,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         entry.Description,
 			ContextLength:       128000,
 			MaxCompletionTokens: 16384,
+			SupportedEndpoints:  []string{"/chat/completions", "/responses"},
 		})
 	}
 
