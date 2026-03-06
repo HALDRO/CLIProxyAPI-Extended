@@ -149,7 +149,11 @@ func (p *GeminiProvider) applyThinkingConfig(genConfig map[string]interface{}, r
 		"includeThoughts": true,
 	}
 
-	if req.Thinking.Budget > 0 {
+	// Upstream parity: when Effort is set (from adaptive/auto thinking), emit thinkingLevel
+	// instead of thinkingBudget. ApplyThinking later normalizes/clamps per target model.
+	if req.Thinking.Effort != "" {
+		thinkingConfig["thinkingLevel"] = req.Thinking.Effort
+	} else if req.Thinking.Budget > 0 {
 		// Explicit budget specified
 		thinkingConfig["thinkingBudget"] = req.Thinking.Budget
 	} else if req.Thinking.Budget == -1 || req.Thinking.IncludeThoughts {
@@ -563,18 +567,24 @@ func (p *GeminiProvider) applyTools(root map[string]interface{}, req *ir.Unified
 		root["tools"] = tools
 	}
 
+	// Set toolConfig: prefer explicit FunctionCalling (from Claude tool_choice parsing)
+	// over the simple ToolChoice string. This ensures allowedFunctionNames are preserved.
 	if len(funcs) > 0 {
-		mode := "AUTO"
-		switch req.ToolChoice {
-		case "none":
-			mode = "NONE"
-		case "required", "any":
-			mode = "ANY"
-		case "auto", "":
-			mode = "AUTO"
-		}
-		root["toolConfig"] = map[string]interface{}{
-			"functionCallingConfig": map[string]interface{}{"mode": mode},
+		if req.FunctionCalling != nil {
+			p.applyFunctionCallingConfig(root, req.FunctionCalling)
+		} else {
+			mode := "AUTO"
+			switch req.ToolChoice {
+			case "none":
+				mode = "NONE"
+			case "required", "any":
+				mode = "ANY"
+			case "auto", "":
+				mode = "AUTO"
+			}
+			root["toolConfig"] = map[string]interface{}{
+				"functionCallingConfig": map[string]interface{}{"mode": mode},
+			}
 		}
 	}
 

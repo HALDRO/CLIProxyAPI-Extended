@@ -70,6 +70,14 @@ func ToCodexRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 	// Codex requires store=false.
 	m["store"] = false
 
+	// Upstream parity: forward service_tier="priority" when present in metadata.
+	// Other service_tier values are intentionally dropped (see to_ir/openai.go).
+	if req.Metadata != nil {
+		if st, ok := req.Metadata["service_tier"].(string); ok && st == "priority" {
+			m["service_tier"] = "priority"
+		}
+	}
+
 	// Intentionally do NOT emit temperature/top_p/max_output_tokens for Codex.
 	// (Codex upstream rejects them.)
 

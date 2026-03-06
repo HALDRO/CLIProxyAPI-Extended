@@ -131,6 +131,33 @@ func ParseClaudeRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 		}
 	}
 
+	// tool_choice — map Claude tool_choice to IR FunctionCalling config.
+	// Claude format: {"type":"auto"}, {"type":"none"}, {"type":"any"}, {"type":"tool","name":"..."}
+	if tc := parsed.Get("tool_choice"); tc.Exists() {
+		tcType := ""
+		tcName := ""
+		if tc.IsObject() {
+			tcType = tc.Get("type").String()
+			tcName = tc.Get("name").String()
+		} else if tc.Type == gjson.String {
+			tcType = tc.String()
+		}
+		switch tcType {
+		case "auto":
+			req.FunctionCalling = &ir.FunctionCallingConfig{Mode: "AUTO"}
+		case "none":
+			req.FunctionCalling = &ir.FunctionCallingConfig{Mode: "NONE"}
+		case "any":
+			req.FunctionCalling = &ir.FunctionCallingConfig{Mode: "ANY"}
+		case "tool":
+			fc := &ir.FunctionCallingConfig{Mode: "ANY"}
+			if tcName != "" {
+				fc.AllowedFunctionNames = []string{tcName}
+			}
+			req.FunctionCalling = fc
+		}
+	}
+
 	// Thinking/Reasoning config
 	if thinking := parsed.Get("thinking"); thinking.Exists() && thinking.IsObject() {
 		switch thinking.Get("type").String() {
@@ -150,6 +177,11 @@ func ParseClaudeRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 			if effort := parsed.Get("output_config.effort"); effort.Exists() && effort.Type == gjson.String {
 				effortStr := strings.ToLower(strings.TrimSpace(effort.String()))
 				if effortStr != "" {
+					// Upstream parity: "max" is not a valid Gemini thinkingLevel,
+					// map it to "high" which is the highest supported level.
+					if effortStr == "max" {
+						effortStr = "high"
+					}
 					req.Thinking.Effort = effortStr
 				}
 			}

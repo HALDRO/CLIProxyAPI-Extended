@@ -151,6 +151,15 @@ func ParseOpenAIRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 		}
 	}
 
+	// service_tier — preserve in metadata for Codex passthrough.
+	// Upstream parity: only "priority" is forwarded; other values are dropped.
+	if st := root.Get("service_tier"); st.Exists() && st.String() == "priority" {
+		if req.Metadata == nil {
+			req.Metadata = make(map[string]any)
+		}
+		req.Metadata["service_tier"] = "priority"
+	}
+
 	// Response Format (Structured Output)
 	if rf := root.Get("response_format"); rf.Exists() {
 		if rf.Get("type").String() == "json_schema" {
