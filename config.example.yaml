@@ -96,6 +96,10 @@ passthrough-headers: false
 # Number of times to retry a request. Retries will occur if the HTTP response code is 403, 408, 500, 502, 503, or 504.
 request-retry: 3
 
+# Maximum number of different credentials to try for one failed request.
+# Set to 0 to keep legacy behavior (try all available credentials).
+max-retry-credentials: 0
+
 # Maximum wait time in seconds for a cooled-down credential before triggering a retry.
 max-retry-interval: 30
 
@@ -200,6 +204,7 @@ nonstream-keepalive-interval: 0
 #       sensitive-words:             # optional: words to obfuscate with zero-width characters
 #         - "API"
 #         - "proxy"
+#       cache-user-id: true          # optional: default is false; set true to reuse cached user_id per API key instead of generating a random one each request
 
 # Default headers for Claude API requests. Update when Claude Code releases new versions.
 # These are used as fallbacks when the client does not send its own headers.
@@ -214,6 +219,8 @@ nonstream-keepalive-interval: 0
 #kiro:
 #  - token-file: "~/.aws/sso/cache/kiro-auth-token.json" # path to Kiro token file
 #    agent-task-type: "" # optional: "vibe" or empty (API default)
+#    start-url: "https://your-company.awsapps.com/start" # optional: IDC start URL (preset for login)
+#    region: "us-east-1" # optional: OIDC region for IDC login and token refresh
 #  - access-token: "aoaAAAAA..." # or provide tokens directly
 #    refresh-token: "aorAAAAA..."
 #    profile-arn: "arn:aws:codewhisperer:us-east-1:..."

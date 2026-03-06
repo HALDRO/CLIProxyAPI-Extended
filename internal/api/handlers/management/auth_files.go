@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -48,14 +49,11 @@ import (
 var lastRefreshKeys = []string{"last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"}
 
 const (
-	anthropicCallbackPort   = 54545
-	geminiCallbackPort      = 8085
-	codexCallbackPort       = 1455
-	geminiCLIEndpoint       = "https://cloudcode-pa.googleapis.com"
-	geminiCLIVersion        = "v1internal"
-	geminiCLIUserAgent      = "google-api-nodejs-client/9.15.1"
-	geminiCLIApiClient      = "gl-node/22.17.0"
-	geminiCLIClientMetadata = "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI"
+	anthropicCallbackPort = 54545
+	geminiCallbackPort    = 8085
+	codexCallbackPort     = 1455
+	geminiCLIEndpoint     = "https://cloudcode-pa.googleapis.com"
+	geminiCLIVersion      = "v1internal"
 )
 
 type callbackForwarder struct {
@@ -193,17 +191,6 @@ func startCallbackForwarder(port int, provider, targetBase string) (*callbackFor
 	log.Infof("callback forwarder for %s listening on %s", provider, addr)
 
 	return forwarder, nil
-}
-
-func stopCallbackForwarder(port int) {
-	callbackForwardersMu.Lock()
-	forwarder := callbackForwarders[port]
-	if forwarder != nil {
-		delete(callbackForwarders, port)
-	}
-	callbackForwardersMu.Unlock()
-
-	stopForwarderInstance(port, forwarder)
 }
 
 func stopCallbackForwarderInstance(port int, forwarder *callbackForwarder) {
@@ -411,6 +398,9 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	}
 	if !auth.LastRefreshedAt.IsZero() {
 		entry["last_refresh"] = auth.LastRefreshedAt
+	}
+	if !auth.NextRetryAfter.IsZero() {
+		entry["next_retry_after"] = auth.NextRetryAfter
 	}
 	if path != "" {
 		entry["path"] = path
@@ -644,26 +634,64 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid name"})
 		return
 	}
-	full := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
-	if !filepath.IsAbs(full) {
-		if abs, errAbs := filepath.Abs(full); errAbs == nil {
-			full = abs
+
+	targetPath := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
+	targetID := ""
+	if targetAuth := h.findAuthForDelete(name); targetAuth != nil {
+		targetID = strings.TrimSpace(targetAuth.ID)
+		if path := strings.TrimSpace(authAttribute(targetAuth, "path")); path != "" {
+			targetPath = path
 		}
 	}
-	if err := os.Remove(full); err != nil {
-		if os.IsNotExist(err) {
+	if !filepath.IsAbs(targetPath) {
+		if abs, errAbs := filepath.Abs(targetPath); errAbs == nil {
+			targetPath = abs
+		}
+	}
+	if errRemove := os.Remove(targetPath); errRemove != nil {
+		if os.IsNotExist(errRemove) {
 			c.JSON(404, gin.H{"error": "file not found"})
 		} else {
-			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to remove file: %v", err)})
+			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to remove file: %v", errRemove)})
 		}
 		return
 	}
-	if err := h.deleteTokenRecord(ctx, full); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+	if errDeleteRecord := h.deleteTokenRecord(ctx, targetPath); errDeleteRecord != nil {
+		c.JSON(500, gin.H{"error": errDeleteRecord.Error()})
 		return
 	}
-	h.disableAuth(ctx, full)
+	if targetID != "" {
+		h.disableAuth(ctx, targetID)
+	} else {
+		h.disableAuth(ctx, targetPath)
+	}
 	c.JSON(200, gin.H{"status": "ok"})
+}
+
+func (h *Handler) findAuthForDelete(name string) *coreauth.Auth {
+	if h == nil || h.authManager == nil {
+		return nil
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	if auth, ok := h.authManager.GetByID(name); ok {
+		return auth
+	}
+	auths := h.authManager.List()
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		if strings.TrimSpace(auth.FileName) == name {
+			return auth
+		}
+		if filepath.Base(strings.TrimSpace(authAttribute(auth, "path"))) == name {
+			return auth
+		}
+	}
+	return nil
 }
 
 func (h *Handler) authIDForPath(path string) string {
@@ -671,17 +699,20 @@ func (h *Handler) authIDForPath(path string) string {
 	if path == "" {
 		return ""
 	}
-	if h == nil || h.cfg == nil {
-		return path
+	id := path
+	if h != nil && h.cfg != nil {
+		authDir := strings.TrimSpace(h.cfg.AuthDir)
+		if authDir != "" {
+			if rel, errRel := filepath.Rel(authDir, path); errRel == nil && rel != "" {
+				id = rel
+			}
+		}
 	}
-	authDir := strings.TrimSpace(h.cfg.AuthDir)
-	if authDir == "" {
-		return path
+	// On Windows, normalize ID casing to avoid duplicate auth entries caused by case-insensitive paths.
+	if runtime.GOOS == "windows" {
+		id = strings.ToLower(id)
 	}
-	if rel, err := filepath.Rel(authDir, path); err == nil && rel != "" {
-		return rel
-	}
-	return path
+	return id
 }
 
 func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []byte) error {
@@ -899,10 +930,19 @@ func (h *Handler) disableAuth(ctx context.Context, id string) {
 	if h == nil || h.authManager == nil {
 		return
 	}
-	authID := h.authIDForPath(id)
-	if authID == "" {
-		authID = strings.TrimSpace(id)
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return
 	}
+	if auth, ok := h.authManager.GetByID(id); ok {
+		auth.Disabled = true
+		auth.Status = coreauth.StatusDisabled
+		auth.StatusMessage = "removed via management API"
+		auth.UpdatedAt = time.Now()
+		_, _ = h.authManager.Update(ctx, auth)
+		return
+	}
+	authID := h.authIDForPath(id)
 	if authID == "" {
 		return
 	}
@@ -951,11 +991,17 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 	if store == nil {
 		return "", fmt.Errorf("token store unavailable")
 	}
+	if h.postAuthHook != nil {
+		if err := h.postAuthHook(ctx, record); err != nil {
+			return "", fmt.Errorf("post-auth hook failed: %w", err)
+		}
+	}
 	return store.Save(ctx, record)
 }
 
 func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
 
 	fmt.Println("Initializing Claude authentication...")
 
@@ -1100,6 +1146,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 
 func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
 	proxyHTTPClient := util.SetProxy(&h.cfg.SDKConfig, &http.Client{})
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, proxyHTTPClient)
 
@@ -1358,6 +1405,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 
 func (h *Handler) RequestCodexToken(c *gin.Context) {
 	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
 
 	fmt.Println("Initializing Codex authentication...")
 
@@ -1503,6 +1551,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
 
 	fmt.Println("Initializing Antigravity authentication...")
 
@@ -1667,6 +1716,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 
 func (h *Handler) RequestQwenToken(c *gin.Context) {
 	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
 
 	fmt.Println("Initializing Qwen authentication...")
 
@@ -1722,6 +1772,7 @@ func (h *Handler) RequestQwenToken(c *gin.Context) {
 
 func (h *Handler) RequestKimiToken(c *gin.Context) {
 	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
 
 	fmt.Println("Initializing Kimi authentication...")
 
@@ -1798,6 +1849,7 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 
 func (h *Handler) RequestIFlowToken(c *gin.Context) {
 	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
 
 	fmt.Println("Initializing iFlow authentication...")
 
@@ -1917,8 +1969,6 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 	state := fmt.Sprintf("gh-%d", time.Now().UnixNano())
 
 	// Initialize Copilot auth service
-	// We need to import "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot" first if not present
-	// Assuming copilot package is imported as "copilot"
 	deviceClient := copilot.NewDeviceFlowClient(h.cfg)
 
 	// Initiate device flow
@@ -1932,7 +1982,7 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 	authURL := deviceCode.VerificationURI
 	userCode := deviceCode.UserCode
 
-	RegisterOAuthSession(state, "github")
+	RegisterOAuthSession(state, "github-copilot")
 
 	go func() {
 		fmt.Printf("Please visit %s and enter code: %s\n", authURL, userCode)
@@ -1944,9 +1994,13 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 			return
 		}
 
-		username, errUser := deviceClient.FetchUserInfo(ctx, tokenData.AccessToken)
+		userInfo, errUser := deviceClient.FetchUserInfo(ctx, tokenData.AccessToken)
 		if errUser != nil {
 			log.Warnf("Failed to fetch user info: %v", errUser)
+		}
+
+		username := userInfo.Login
+		if username == "" {
 			username = "github-user"
 		}
 
@@ -1955,18 +2009,26 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 			TokenType:   tokenData.TokenType,
 			Scope:       tokenData.Scope,
 			Username:    username,
+			Email:       userInfo.Email,
+			Name:        userInfo.Name,
 			Type:        "github-copilot",
 		}
 
-		fileName := fmt.Sprintf("github-%s.json", username)
+		fileName := fmt.Sprintf("github-copilot-%s.json", username)
+		label := userInfo.Email
+		if label == "" {
+			label = username
+		}
 		record := &coreauth.Auth{
 			ID:       fileName,
-			Provider: "github",
+			Provider: "github-copilot",
+			Label:    label,
 			FileName: fileName,
 			Storage:  tokenStorage,
 			Metadata: map[string]any{
-				"email":    username,
+				"email":    userInfo.Email,
 				"username": username,
+				"name":     userInfo.Name,
 			},
 		}
 
@@ -1980,7 +2042,7 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
 		fmt.Println("You can now use GitHub Copilot services through this CLI")
 		CompleteOAuthSession(state)
-		CompleteOAuthSessionsByProvider("github")
+		CompleteOAuthSessionsByProvider("github-copilot")
 	}()
 
 	c.JSON(200, gin.H{
@@ -2359,9 +2421,7 @@ func callGeminiCLI(ctx context.Context, httpClient *http.Client, endpoint string
 		return fmt.Errorf("create request: %w", errRequest)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", geminiCLIUserAgent)
-	req.Header.Set("X-Goog-Api-Client", geminiCLIApiClient)
-	req.Header.Set("Client-Metadata", geminiCLIClientMetadata)
+	req.Header.Set("User-Agent", misc.GeminiCLIUserAgent(""))
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -2431,7 +2491,7 @@ func checkCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 			return false, fmt.Errorf("failed to create request: %w", errRequest)
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", geminiCLIUserAgent)
+		req.Header.Set("User-Agent", misc.GeminiCLIUserAgent(""))
 		resp, errDo := httpClient.Do(req)
 		if errDo != nil {
 			return false, fmt.Errorf("failed to execute request: %w", errDo)
@@ -2452,7 +2512,7 @@ func checkCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 			return false, fmt.Errorf("failed to create request: %w", errRequest)
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", geminiCLIUserAgent)
+		req.Header.Set("User-Agent", misc.GeminiCLIUserAgent(""))
 		resp, errDo = httpClient.Do(req)
 		if errDo != nil {
 			return false, fmt.Errorf("failed to execute request: %w", errDo)
@@ -2519,6 +2579,15 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "wait"})
+}
+
+// PopulateAuthContext extracts request info and adds it to the context
+func PopulateAuthContext(ctx context.Context, c *gin.Context) context.Context {
+	info := &coreauth.RequestInfo{
+		Query:   c.Request.URL.Query(),
+		Headers: c.Request.Header,
+	}
+	return coreauth.WithRequestInfo(ctx, info)
 }
 
 const kiroCallbackPort = 9876
@@ -2657,6 +2726,7 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 		}
 
 		isWebUI := isWebUIRequest(c)
+		var forwarder *callbackForwarder
 		if isWebUI {
 			targetURL, errTarget := h.managementCallbackURL("/kiro/callback")
 			if errTarget != nil {
@@ -2664,7 +2734,8 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
 				return
 			}
-			if _, errStart := startCallbackForwarder(kiroCallbackPort, "kiro", targetURL); errStart != nil {
+			var errStart error
+			if forwarder, errStart = startCallbackForwarder(kiroCallbackPort, "kiro", targetURL); errStart != nil {
 				log.WithError(errStart).Error("failed to start kiro callback forwarder")
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
 				return
@@ -2673,7 +2744,7 @@ func (h *Handler) RequestKiroToken(c *gin.Context) {
 
 		go func() {
 			if isWebUI {
-				defer stopCallbackForwarder(kiroCallbackPort)
+				defer stopCallbackForwarderInstance(kiroCallbackPort, forwarder)
 			}
 
 			socialClient := kiroauth.NewSocialAuthClient(h.cfg)
@@ -2876,7 +2947,7 @@ func (h *Handler) RequestKiloToken(c *gin.Context) {
 			Metadata: map[string]any{
 				"email":           status.UserEmail,
 				"organization_id": orgID,
-				"model":          defaults.Model,
+				"model":           defaults.Model,
 			},
 		}
 

@@ -6,56 +6,11 @@
 package openai
 
 import (
-	"strings"
-
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
-
-// validReasoningEffortLevels contains the standard values accepted by the
-// OpenAI reasoning_effort field. Provider-specific extensions (xhigh, minimal,
-// auto) are NOT in this set and must be clamped before use.
-var validReasoningEffortLevels = map[string]struct{}{
-	"none":   {},
-	"low":    {},
-	"medium": {},
-	"high":   {},
-}
-
-// clampReasoningEffort maps any thinking level string to a value that is safe
-// to send as OpenAI reasoning_effort. Non-standard CPA-internal values are
-// mapped to the nearest standard equivalent.
-//
-// Mapping rules:
-//   - none / low / medium / high  → returned as-is (already valid)
-//   - xhigh                       → "high" (nearest lower standard level)
-//   - minimal                     → "low" (nearest higher standard level)
-//   - auto                        → "medium" (reasonable default)
-//   - anything else               → "medium" (safe default)
-func clampReasoningEffort(level string) string {
-	if _, ok := validReasoningEffortLevels[level]; ok {
-		return level
-	}
-	var clamped string
-	switch level {
-	case string(thinking.LevelXHigh):
-		clamped = string(thinking.LevelHigh)
-	case string(thinking.LevelMinimal):
-		clamped = string(thinking.LevelLow)
-	case string(thinking.LevelAuto):
-		clamped = string(thinking.LevelMedium)
-	default:
-		clamped = string(thinking.LevelMedium)
-	}
-	log.WithFields(log.Fields{
-		"original": level,
-		"clamped":  clamped,
-	}).Debug("openai: reasoning_effort clamped to nearest valid standard value")
-	return clamped
-}
 
 // Applier implements thinking.ProviderApplier for OpenAI models.
 //
@@ -101,14 +56,14 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	}
 
 	if config.Mode == thinking.ModeLevel {
-		result, _ := sjson.SetBytes(body, "reasoning_effort", clampReasoningEffort(string(config.Level)))
+		result, _ := sjson.SetBytes(body, "reasoning_effort", string(config.Level))
 		return result, nil
 	}
 
 	effort := ""
 	support := modelInfo.Thinking
 	if config.Budget == 0 {
-		if support.ZeroAllowed || hasLevel(support.Levels, string(thinking.LevelNone)) {
+		if support.ZeroAllowed || thinking.HasLevel(support.Levels, string(thinking.LevelNone)) {
 			effort = string(thinking.LevelNone)
 		}
 	}
@@ -122,7 +77,7 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		return body, nil
 	}
 
-	result, _ := sjson.SetBytes(body, "reasoning_effort", clampReasoningEffort(effort))
+	result, _ := sjson.SetBytes(body, "reasoning_effort", effort)
 	return result, nil
 }
 
@@ -157,15 +112,6 @@ func applyCompatibleOpenAI(body []byte, config thinking.ThinkingConfig) ([]byte,
 		return body, nil
 	}
 
-	result, _ := sjson.SetBytes(body, "reasoning_effort", clampReasoningEffort(effort))
+	result, _ := sjson.SetBytes(body, "reasoning_effort", effort)
 	return result, nil
-}
-
-func hasLevel(levels []string, target string) bool {
-	for _, level := range levels {
-		if strings.EqualFold(strings.TrimSpace(level), target) {
-			return true
-		}
-	}
-	return false
 }

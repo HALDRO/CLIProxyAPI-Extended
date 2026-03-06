@@ -38,10 +38,12 @@ type KiroInferenceConfig struct {
 
 // KiroConversationState holds the conversation context
 type KiroConversationState struct {
-	ChatTriggerType string               `json:"chatTriggerType"` // Required: "MANUAL" - must be first field
-	ConversationID  string               `json:"conversationId"`
-	CurrentMessage  KiroCurrentMessage   `json:"currentMessage"`
-	History         []KiroHistoryMessage `json:"history,omitempty"`
+	AgentContinuationID string               `json:"agentContinuationId,omitempty"`
+	AgentTaskType       string               `json:"agentTaskType,omitempty"`
+	ChatTriggerType     string               `json:"chatTriggerType"` // Required: "MANUAL"
+	ConversationID      string               `json:"conversationId"`
+	CurrentMessage      KiroCurrentMessage   `json:"currentMessage"`
+	History             []KiroHistoryMessage `json:"history,omitempty"`
 }
 
 // KiroCurrentMessage wraps the current user message
@@ -243,13 +245,11 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 	// Process messages and build history
 	history, currentUserMsg, currentToolResults := processMessages(messages, modelID, origin)
 
-	// Build content with system prompt (only on first turn to avoid re-injection)
+	// Build content with system prompt.
+	// Keep thinking tags on subsequent turns so multi-turn Claude sessions
+	// continue to emit reasoning events.
 	if currentUserMsg != nil {
-		effectiveSystemPrompt := systemPrompt
-		if len(history) > 0 {
-			effectiveSystemPrompt = "" // Don't re-inject on subsequent turns
-		}
-		currentUserMsg.Content = buildFinalContent(currentUserMsg.Content, effectiveSystemPrompt, currentToolResults)
+		currentUserMsg.Content = buildFinalContent(currentUserMsg.Content, systemPrompt, currentToolResults)
 
 		// Deduplicate currentToolResults
 		currentToolResults = deduplicateToolResults(currentToolResults)
@@ -295,15 +295,28 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 		}
 	}
 
+	// Session IDs: extract from messages[].additional_kwargs (LangChain format) or random
+	conversationID := extractMetadataFromMessages(messages, "conversationId")
+	continuationID := extractMetadataFromMessages(messages, "continuationId")
+	if conversationID == "" {
+		conversationID = uuid.New().String()
+	}
+
 	payload := KiroPayload{
 		ConversationState: KiroConversationState{
+			AgentTaskType:   "vibe",
 			ChatTriggerType: "MANUAL",
-			ConversationID:  uuid.New().String(),
+			ConversationID:  conversationID,
 			CurrentMessage:  currentMessage,
 			History:         history,
 		},
 		ProfileArn:      profileArn,
 		InferenceConfig: inferenceConfig,
+	}
+
+	// Only set AgentContinuationID if client provided
+	if continuationID != "" {
+		payload.ConversationState.AgentContinuationID = continuationID
 	}
 
 	result, err := json.Marshal(payload)
@@ -329,6 +342,18 @@ func normalizeOrigin(origin string) string {
 	default:
 		return origin
 	}
+}
+
+// extractMetadataFromMessages extracts metadata from messages[].additional_kwargs (LangChain format).
+// Searches from the last message backwards, returns empty string if not found.
+func extractMetadataFromMessages(messages gjson.Result, key string) string {
+	arr := messages.Array()
+	for i := len(arr) - 1; i >= 0; i-- {
+		if val := arr[i].Get("additional_kwargs." + key); val.Exists() && val.String() != "" {
+			return val.String()
+		}
+	}
+	return ""
 }
 
 // extractSystemPrompt extracts system prompt from Claude request
@@ -473,6 +498,15 @@ func IsThinkingEnabledWithHeaders(body []byte, headers http.Header) bool {
 			log.Debugf("kiro: thinking mode enabled via model name hint: %s", model)
 			return true
 		}
+	}
+
+	// Check model name directly for thinking hints.
+	// This enables thinking variants even when clients don't send explicit thinking fields.
+	model := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	modelLower := strings.ToLower(model)
+	if strings.Contains(modelLower, "thinking") || strings.Contains(modelLower, "-reason") {
+		log.Debugf("kiro: thinking mode enabled via model name hint: %s", model)
+		return true
 	}
 
 	log.Debugf("kiro: IsThinkingEnabled returning false (no thinking mode detected)")

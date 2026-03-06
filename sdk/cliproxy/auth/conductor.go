@@ -59,7 +59,8 @@ type RefreshEvaluator interface {
 }
 
 const (
-	refreshCheckInterval  = 30 * time.Second
+	refreshCheckInterval  = 5 * time.Second
+	refreshMaxConcurrency = 16
 	refreshPendingBackoff = time.Minute
 	refreshFailureBackoff = 1 * time.Minute
 	quotaBackoffBase      = time.Second
@@ -137,8 +138,9 @@ type Manager struct {
 	providerOffsets map[string]int
 
 	// Retry controls request retry behavior.
-	requestRetry     atomic.Int32
-	maxRetryInterval atomic.Int64
+	requestRetry        atomic.Int32
+	maxRetryCredentials atomic.Int32
+	maxRetryInterval    atomic.Int64
 
 	// oauthModelAlias stores global OAuth model alias mappings (alias -> upstream name) keyed by channel.
 	oauthModelAlias atomic.Value
@@ -155,7 +157,8 @@ type Manager struct {
 	rtProvider RoundTripperProvider
 
 	// Auto refresh state
-	refreshCancel context.CancelFunc
+	refreshCancel    context.CancelFunc
+	refreshSemaphore chan struct{}
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -167,12 +170,13 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		hook = NoopHook{}
 	}
 	manager := &Manager{
-		store:           store,
-		executors:       make(map[string]ProviderExecutor),
-		selector:        selector,
-		hook:            hook,
-		auths:           make(map[string]*Auth),
-		providerOffsets: make(map[string]int),
+		store:            store,
+		executors:        make(map[string]ProviderExecutor),
+		selector:         selector,
+		hook:             hook,
+		auths:            make(map[string]*Auth),
+		providerOffsets:  make(map[string]int),
+		refreshSemaphore: make(chan struct{}, refreshMaxConcurrency),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
@@ -381,18 +385,22 @@ func compileAPIKeyModelAliasForModels[T interface {
 	}
 }
 
-// SetRetryConfig updates retry attempts and cooldown wait interval.
-func (m *Manager) SetRetryConfig(retry int, maxRetryInterval time.Duration) {
+// SetRetryConfig updates retry attempts, credential retry limit and cooldown wait interval.
+func (m *Manager) SetRetryConfig(retry int, maxRetryInterval time.Duration, maxRetryCredentials int) {
 	if m == nil {
 		return
 	}
 	if retry < 0 {
 		retry = 0
 	}
+	if maxRetryCredentials < 0 {
+		maxRetryCredentials = 0
+	}
 	if maxRetryInterval < 0 {
 		maxRetryInterval = 0
 	}
 	m.requestRetry.Store(int32(retry))
+	m.maxRetryCredentials.Store(int32(maxRetryCredentials))
 	m.maxRetryInterval.Store(maxRetryInterval.Nanoseconds())
 }
 
@@ -455,9 +463,14 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		return nil, nil
 	}
 	m.mu.Lock()
-	if existing, ok := m.auths[auth.ID]; ok && existing != nil && !auth.indexAssigned && auth.Index == "" {
-		auth.Index = existing.Index
-		auth.indexAssigned = existing.indexAssigned
+	if existing, ok := m.auths[auth.ID]; ok && existing != nil {
+		if !auth.indexAssigned && auth.Index == "" {
+			auth.Index = existing.Index
+			auth.indexAssigned = existing.indexAssigned
+		}
+		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
+			auth.ModelStates = existing.ModelStates
+		}
 	}
 	auth.EnsureIndex()
 	m.auths[auth.ID] = auth.Clone()
@@ -503,11 +516,11 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 
-	_, maxWait := m.retrySettings()
+	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
-		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts)
+		resp, errExec := m.executeMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errExec == nil {
 			return resp, nil
 		}
@@ -534,11 +547,11 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 
-	_, maxWait := m.retrySettings()
+	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
-		resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, opts)
+		resp, errExec := m.executeCountMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errExec == nil {
 			return resp, nil
 		}
@@ -565,11 +578,11 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 
-	_, maxWait := m.retrySettings()
+	_, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {
-		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts)
+		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, opts, maxRetryCredentials)
 		if errStream == nil {
 			return result, nil
 		}
@@ -588,7 +601,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
 
-func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (cliproxyexecutor.Response, error) {
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -597,6 +610,12 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	tried := make(map[string]struct{})
 	var lastErr error
 	for {
+		if maxRetryCredentials > 0 && len(tried) >= maxRetryCredentials {
+			if lastErr != nil {
+				return cliproxyexecutor.Response{}, lastErr
+			}
+			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
+		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
 			if lastErr != nil {
@@ -644,7 +663,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	}
 }
 
-func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (cliproxyexecutor.Response, error) {
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -653,6 +672,12 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	tried := make(map[string]struct{})
 	var lastErr error
 	for {
+		if maxRetryCredentials > 0 && len(tried) >= maxRetryCredentials {
+			if lastErr != nil {
+				return cliproxyexecutor.Response{}, lastErr
+			}
+			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
+		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
 			if lastErr != nil {
@@ -688,19 +713,19 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			if ra := retryAfterFromError(errExec); ra != nil {
 				result.RetryAfter = ra
 			}
-			m.MarkResult(execCtx, result)
+			m.hook.OnResult(execCtx, result)
 			if isRequestInvalidError(errExec) {
 				return cliproxyexecutor.Response{}, errExec
 			}
 			lastErr = errExec
 			continue
 		}
-		m.MarkResult(execCtx, result)
+		m.hook.OnResult(execCtx, result)
 		return resp, nil
 	}
 }
 
-func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int) (*cliproxyexecutor.StreamResult, error) {
 	if len(providers) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -709,6 +734,12 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	tried := make(map[string]struct{})
 	var lastErr error
 	for {
+		if maxRetryCredentials > 0 && len(tried) >= maxRetryCredentials {
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
 			if lastErr != nil {
@@ -1105,11 +1136,11 @@ func (m *Manager) normalizeProviders(providers []string) []string {
 	return result
 }
 
-func (m *Manager) retrySettings() (int, time.Duration) {
+func (m *Manager) retrySettings() (int, int, time.Duration) {
 	if m == nil {
-		return 0, 0
+		return 0, 0, 0
 	}
-	return int(m.requestRetry.Load()), time.Duration(m.maxRetryInterval.Load())
+	return int(m.requestRetry.Load()), int(m.maxRetryCredentials.Load()), time.Duration(m.maxRetryInterval.Load())
 }
 
 func (m *Manager) closestCooldownWait(providers []string, model string, attempt int) (time.Duration, bool) {
@@ -1828,9 +1859,7 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 // every few seconds and triggers refresh operations when required.
 // Only one loop is kept alive; starting a new one cancels the previous run.
 func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duration) {
-	if interval <= 0 || interval > refreshCheckInterval {
-		interval = refreshCheckInterval
-	} else {
+	if interval <= 0 {
 		interval = refreshCheckInterval
 	}
 	if m.refreshCancel != nil {
@@ -1880,9 +1909,23 @@ func (m *Manager) checkRefreshes(ctx context.Context) {
 			if !m.markRefreshPending(a.ID, now) {
 				continue
 			}
-			go m.refreshAuth(ctx, a.ID)
+			go m.refreshAuthWithLimit(ctx, a.ID)
 		}
 	}
+}
+
+func (m *Manager) refreshAuthWithLimit(ctx context.Context, id string) {
+	if m.refreshSemaphore == nil {
+		m.refreshAuth(ctx, id)
+		return
+	}
+	select {
+	case m.refreshSemaphore <- struct{}{}:
+		defer func() { <-m.refreshSemaphore }()
+	case <-ctx.Done():
+		return
+	}
+	m.refreshAuth(ctx, id)
 }
 
 func (m *Manager) snapshotAuths() []*Auth {
