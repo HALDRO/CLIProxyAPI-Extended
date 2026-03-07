@@ -338,11 +338,37 @@ func (s *KiroStreamState) processRegularEvents(parsed gjson.Result) []ir.Unified
 		data = r
 	}
 
+	// Check for reasoningContentEvent nested inside the envelope (e.g. inside
+	// assistantResponseEvent). processReasoningEvent only checks top-level keys,
+	// so nested reasoning would be missed without this.
+	if reasoning := data.Get("reasoningContentEvent"); reasoning.Exists() {
+		content := reasoning.Get("content").String()
+		if content == "" {
+			content = reasoning.Get("text").String()
+		}
+		signature := reasoning.Get("signature").String()
+		if content != "" {
+			s.AccumulatedThinking += content
+			events = append(events, ir.UnifiedEvent{
+				Type:             ir.EventTypeReasoning,
+				Reasoning:        content,
+				ThoughtSignature: signature,
+			})
+		}
+	}
+
 	if content := data.Get("content").String(); content != "" {
-		// Process content with thinking tag parsing
-		textEvents, thinkingEvents := s.processContentWithThinking(content)
-		events = append(events, thinkingEvents...)
-		events = append(events, textEvents...)
+		// During reasoning phase, skip whitespace-only content chunks (e.g. "\n\n"
+		// separators that accompany reasoningContentEvent frames). Mirrors v1
+		// kiro_executor.go behavior where content is TrimSpace'd and dropped if empty.
+		if s.AccumulatedThinking != "" && strings.TrimSpace(content) == "" {
+			// skip — whitespace-only content during reasoning phase
+		} else {
+			// Process content with thinking tag parsing
+			textEvents, thinkingEvents := s.processContentWithThinking(content)
+			events = append(events, thinkingEvents...)
+			events = append(events, textEvents...)
+		}
 	}
 
 	for _, tool := range data.Get("toolUsages").Array() {
