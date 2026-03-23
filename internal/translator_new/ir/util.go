@@ -13,6 +13,7 @@ package ir
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -84,6 +85,23 @@ func DecodeToolIDAndSignature(encoded string) (id, signature string) {
 	id = strings.TrimSpace(encoded[:idx])
 	signature = strings.TrimSpace(encoded[idx+len(marker):])
 	return id, signature
+}
+
+// =============================================================================
+// Claude Tool ID Sanitization
+// =============================================================================
+
+var claudeToolIDRegex = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
+
+// SanitizeClaudeToolID ensures the given id conforms to Claude's
+// tool_use.id regex ^[a-zA-Z0-9_-]+$. Non-conforming characters are
+// replaced with '_'; an empty result gets a generated fallback.
+func SanitizeClaudeToolID(id string) string {
+	s := claudeToolIDRegex.ReplaceAllString(id, "_")
+	if s == "" {
+		s = fmt.Sprintf("toolu_%s", GenerateUUID()[:12])
+	}
+	return s
 }
 
 // =============================================================================

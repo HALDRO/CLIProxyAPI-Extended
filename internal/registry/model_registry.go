@@ -144,8 +144,8 @@ func GetGlobalRegistry() *ModelRegistry {
 			clientModels:         make(map[string][]string),
 			clientModelInfos:     make(map[string]map[string]*ModelInfo),
 			clientProviders:      make(map[string]string),
-			availableModelsCache: make(map[string]availableModelsCacheEntry),
 			mutex:                &sync.RWMutex{},
+			availableModelsCache: make(map[string]availableModelsCacheEntry),
 			showProviderPrefixes: true,
 		}
 	})
@@ -863,6 +863,7 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 		}
 	}
 
+	// Sort by provider prefix, then model name, then ID (descending for reverse order)
 	sort.SliceStable(models, func(i, j int) bool {
 		iID, _ := models[i]["id"].(string)
 		jID, _ := models[j]["id"].(string)
@@ -880,6 +881,7 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 	return models, expiresAt
 }
 
+// cloneModelMaps creates deep copies of model maps to prevent external mutation.
 func cloneModelMaps(models []map[string]any) []map[string]any {
 	cloned := make([]map[string]any, 0, len(models))
 	for _, model := range models {
@@ -896,6 +898,7 @@ func cloneModelMaps(models []map[string]any) []map[string]any {
 	return cloned
 }
 
+// cloneModelMapValue creates deep copies of map values recursively.
 func cloneModelMapValue(value any) any {
 	switch typed := value.(type) {
 	case map[string]any:

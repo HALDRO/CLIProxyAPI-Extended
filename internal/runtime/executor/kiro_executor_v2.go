@@ -886,6 +886,7 @@ func (e *KiroExecutorV2) executeWithRetry(rc *requestContext) (cliproxyexecutor.
 }
 
 func (e *KiroExecutorV2) handleEventStreamResponse(body io.ReadCloser, model string, sourceFormat string) (cliproxyexecutor.Response, error) {
+	defer body.Close()
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(nil, 52_428_800) // 50MB buffer to handle large AWS EventStream frames
 	scanner.Split(splitAWSEventStream)
@@ -904,6 +905,9 @@ func (e *KiroExecutorV2) handleEventStreamResponse(body io.ReadCloser, model str
 		if ev.Type == ir.EventTypeToolCall && ev.ToolCall != nil {
 			state.ToolCalls = append(state.ToolCalls, *ev.ToolCall)
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		return cliproxyexecutor.Response{}, err
 	}
 
 	msg := &ir.Message{Role: ir.RoleAssistant, ToolCalls: state.ToolCalls}
@@ -1155,6 +1159,12 @@ func (e *KiroExecutorV2) processStream(ctx context.Context, resp *http.Response,
 	}
 	if err := scanner.Err(); err != nil {
 		log.Warnf("kiro-v2: stream scanner terminated with error: %v", err)
+		select {
+		case <-ctx.Done():
+			return
+		case out <- cliproxyexecutor.StreamChunk{Err: err}:
+		}
+		return
 	}
 
 	// Flush buffered partial tag suffixes at stream end.
@@ -1168,6 +1178,16 @@ func (e *KiroExecutorV2) processStream(ctx context.Context, resp *http.Response,
 		}
 	}
 	if ctx.Err() != nil {
+		return
+	}
+	if state.AccumulatedThinking != "" && !state.HasSubstantiveOutput {
+		err := fmt.Errorf("kiro-v2: upstream stream ended after reasoning without final answer content")
+		log.Warn(err.Error())
+		select {
+		case <-ctx.Done():
+			return
+		case out <- cliproxyexecutor.StreamChunk{Err: err}:
+		}
 		return
 	}
 

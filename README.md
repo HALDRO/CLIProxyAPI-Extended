@@ -9,6 +9,7 @@
 
 This fork pioneered the **Canonical IR architecture** before the official Plus version. As of January 28, 2026, it synchronizes with [CLIProxyAPIPlus](https://github.com/router-for-me/CLIProxyAPIPlus) while maintaining unique improvements:
 
+<<<<<<< HEAD
 | Feature | Description |
 |---------|-------------|
 | **Full Ollama Compatibility** | Complete bidirectional protocol support (`/api/chat`, `/api/generate`) with streaming — use any provider through Ollama API |
@@ -54,6 +55,9 @@ show-provider-prefixes: true     # Visual provider prefixes (default)
 ```
 
 **Result:** 21 files (7 parsers + 7 emitters + 6 IR core + 1 adapter), 7,992 lines
+=======
+## Contributing
+>>>>>>> plus/main
 
 | Metric                    | Legacy        | Canonical IR  | Δ         |
 |---------------------------|---------------|---------------|-----------|

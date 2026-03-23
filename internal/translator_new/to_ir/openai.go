@@ -804,11 +804,24 @@ func parseOpenAIMessage(m gjson.Result) ir.Message {
 		// Decode thoughtSignature from tool call ID if encoded
 		// This restores the original ID and extracts the signature for round-trip preservation
 		originalID, signature := ir.DecodeToolIDAndSignature(toolCallID)
+		toolResult := &ir.ToolResultPart{
+			ToolCallID: originalID, Result: ir.SanitizeText(extractContentString(content)), ThoughtSignature: signature,
+		}
+		// Extract images from array content in tool results
+		if content.IsArray() {
+			for _, item := range content.Array() {
+				if item.Get("type").String() == "image_url" {
+					imgURL := item.Get("image_url.url").String()
+					if img := parseDataURI(imgURL); img != nil {
+						toolResult.Images = append(toolResult.Images, img)
+					} else if strings.HasPrefix(imgURL, "http://") || strings.HasPrefix(imgURL, "https://") {
+						toolResult.Images = append(toolResult.Images, &ir.ImagePart{URL: imgURL})
+					}
+				}
+			}
+		}
 		msg.Content = append(msg.Content, ir.ContentPart{
-			Type: ir.ContentTypeToolResult,
-			ToolResult: &ir.ToolResultPart{
-				ToolCallID: originalID, Result: ir.SanitizeText(extractContentString(content)), ThoughtSignature: signature,
-			},
+			Type: ir.ContentTypeToolResult, ToolResult: toolResult,
 		})
 	}
 	return msg
@@ -964,16 +977,24 @@ func parseOpenAITool(t gjson.Result) *ir.ToolDefinition {
 func parseOpenAIThinkingConfig(root gjson.Result) *ir.ThinkingConfig {
 	var thinking *ir.ThinkingConfig
 	if re := root.Get("reasoning_effort"); re.Exists() {
-		thinking = &ir.ThinkingConfig{Effort: re.String()}
-		thinking.Budget, thinking.IncludeThoughts = ir.MapEffortToBudget(re.String())
+		effort := strings.ToLower(strings.TrimSpace(re.String()))
+		if effort == "max" {
+			effort = "high"
+		}
+		thinking = &ir.ThinkingConfig{Effort: effort}
+		thinking.Budget, thinking.IncludeThoughts = ir.MapEffortToBudget(effort)
 	}
 	if reasoning := root.Get("reasoning"); reasoning.Exists() && reasoning.IsObject() {
 		if thinking == nil {
 			thinking = &ir.ThinkingConfig{}
 		}
 		if effort := reasoning.Get("effort"); effort.Exists() {
-			thinking.Effort = effort.String()
-			thinking.Budget, thinking.IncludeThoughts = ir.MapEffortToBudget(effort.String())
+			effortStr := strings.ToLower(strings.TrimSpace(effort.String()))
+			if effortStr == "max" {
+				effortStr = "high"
+			}
+			thinking.Effort = effortStr
+			thinking.Budget, thinking.IncludeThoughts = ir.MapEffortToBudget(effortStr)
 		}
 		if summary := reasoning.Get("summary"); summary.Exists() {
 			thinking.Summary = summary.String()
@@ -1022,6 +1043,9 @@ func parseOpenAIThinkingConfig(root gjson.Result) *ir.ThinkingConfig {
 			thinking.Budget = -1 // Auto
 			if effort := root.Get("output_config.effort"); effort.Exists() && effort.Type == gjson.String {
 				effortStr := strings.ToLower(strings.TrimSpace(effort.String()))
+				if effortStr == "max" {
+					effortStr = "high"
+				}
 				if effortStr != "" {
 					thinking.Effort = effortStr
 				}

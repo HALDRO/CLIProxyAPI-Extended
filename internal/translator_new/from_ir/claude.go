@@ -180,7 +180,7 @@ func buildMessages(msgs []ir.Message) []interface{} {
 			for _, part := range msg.Content {
 				if part.Type == ir.ContentTypeToolResult && part.ToolResult != nil {
 					toolResultBlock := map[string]interface{}{
-						"type": ir.ClaudeBlockToolResult, "tool_use_id": part.ToolResult.ToolCallID, "content": part.ToolResult.Result,
+						"type": ir.ClaudeBlockToolResult, "tool_use_id": ir.SanitizeClaudeToolID(part.ToolResult.ToolCallID), "content": part.ToolResult.Result,
 					}
 					// Include images from tool results as content array with image blocks.
 					if len(part.ToolResult.Images) > 0 {
@@ -395,7 +395,7 @@ func buildClaudeContentParts(msg ir.Message, includeToolCalls bool) []interface{
 		case ir.ContentTypeToolResult:
 			if p.ToolResult != nil {
 				toolResultBlock := map[string]interface{}{
-					"type": ir.ClaudeBlockToolResult, "tool_use_id": p.ToolResult.ToolCallID, "content": p.ToolResult.Result,
+					"type": ir.ClaudeBlockToolResult, "tool_use_id": ir.SanitizeClaudeToolID(p.ToolResult.ToolCallID), "content": p.ToolResult.Result,
 				}
 				// Include images from tool results as content array with image blocks.
 				if len(p.ToolResult.Images) > 0 {
@@ -423,7 +423,7 @@ func buildClaudeContentParts(msg ir.Message, includeToolCalls bool) []interface{
 	}
 	if includeToolCalls {
 		for _, tc := range msg.ToolCalls {
-			toolUse := map[string]interface{}{"type": ir.ClaudeBlockToolUse, "id": tc.ID, "name": tc.Name}
+			toolUse := map[string]interface{}{"type": ir.ClaudeBlockToolUse, "id": ir.SanitizeClaudeToolID(tc.ID), "name": tc.Name}
 			input := ir.ParseToolCallArgs(tc.Args)
 			// Remove null values from tool input (Roo/Kilo compatibility)
 			cleanedInput := ir.RemoveNullsFromToolInput(input)
@@ -605,7 +605,7 @@ func emitToolCall(tc *ir.ToolCall, state *ClaudeStreamState) string {
 
 	result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStart, map[string]interface{}{
 		"type": ir.ClaudeSSEContentBlockStart, "index": idx,
-		"content_block": map[string]interface{}{"type": ir.ClaudeBlockToolUse, "id": tc.ID, "name": tc.Name, "input": map[string]interface{}{}},
+		"content_block": map[string]interface{}{"type": ir.ClaudeBlockToolUse, "id": ir.SanitizeClaudeToolID(tc.ID), "name": tc.Name, "input": map[string]interface{}{}},
 	}))
 
 	// Emit initial args delta if present

@@ -128,6 +128,8 @@ type KiroStreamState struct {
 	InThinkingBlock           bool    // Whether we're currently inside a <thinking> block
 	PendingContent            string  // Pending suffix that may be a partial thinking tag across chunks
 	AccumulatedThinking       string  // Accumulated thinking content
+	ContentPhaseStarted       bool    // True once we've emitted at least one non-whitespace content event after reasoning
+	HasSubstantiveOutput      bool    // True once we've seen real non-whitespace answer content or tool output
 	UpstreamContextPercentage float64 // Context usage percentage from contextUsageEvent (0.0 - 1.0)
 	ContextWindowTokens       int     // Model context window used to convert context percentage to prompt tokens
 }
@@ -358,12 +360,17 @@ func (s *KiroStreamState) processRegularEvents(parsed gjson.Result) []ir.Unified
 	}
 
 	if content := data.Get("content").String(); content != "" {
-		// During reasoning phase, skip whitespace-only content chunks (e.g. "\n\n"
-		// separators that accompany reasoningContentEvent frames). Mirrors v1
-		// kiro_executor.go behavior where content is TrimSpace'd and dropped if empty.
-		if s.AccumulatedThinking != "" && strings.TrimSpace(content) == "" {
-			// skip — whitespace-only content during reasoning phase
+		// During active reasoning phase (before any real content has been emitted),
+		// skip whitespace-only content chunks (e.g. "\n\n" separators that accompany
+		// reasoningContentEvent frames). Once the content phase has started, whitespace
+		// is meaningful and must be forwarded to avoid breaking formatting.
+		if s.AccumulatedThinking != "" && !s.ContentPhaseStarted && strings.TrimSpace(content) == "" {
+			// skip — whitespace-only content during active reasoning phase
 		} else {
+			if strings.TrimSpace(content) != "" {
+				s.ContentPhaseStarted = true
+				s.HasSubstantiveOutput = true
+			}
 			// Process content with thinking tag parsing
 			textEvents, thinkingEvents := s.processContentWithThinking(content)
 			events = append(events, thinkingEvents...)
@@ -379,6 +386,7 @@ func (s *KiroStreamState) processRegularEvents(parsed gjson.Result) []ir.Unified
 		}
 		if !s.hasToolCall(tc.ID) {
 			s.ToolCalls = append(s.ToolCalls, tc)
+			s.HasSubstantiveOutput = true
 			events = append(events, ir.UnifiedEvent{Type: ir.EventTypeToolCall, ToolCall: &tc})
 		}
 	}

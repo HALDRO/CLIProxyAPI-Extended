@@ -683,6 +683,31 @@ func buildOpenAIAssistantMessage(msg ir.Message) map[string]interface{} {
 func buildOpenAIToolMessage(msg ir.Message) map[string]interface{} {
 	for _, part := range msg.Content {
 		if part.Type == ir.ContentTypeToolResult && part.ToolResult != nil {
+			// If tool result contains images, emit content as array with text + image_url parts
+			if len(part.ToolResult.Images) > 0 {
+				var contentParts []interface{}
+				if part.ToolResult.Result != "" {
+					contentParts = append(contentParts, map[string]interface{}{
+						"type": "text", "text": part.ToolResult.Result,
+					})
+				}
+				for _, img := range part.ToolResult.Images {
+					if img.URL != "" {
+						contentParts = append(contentParts, map[string]interface{}{
+							"type":      "image_url",
+							"image_url": map[string]string{"url": img.URL},
+						})
+					} else if img.Data != "" {
+						contentParts = append(contentParts, map[string]interface{}{
+							"type":      "image_url",
+							"image_url": map[string]string{"url": fmt.Sprintf("data:%s;base64,%s", img.MimeType, img.Data)},
+						})
+					}
+				}
+				return map[string]interface{}{
+					"role": "tool", "tool_call_id": part.ToolResult.ToolCallID, "content": contentParts,
+				}
+			}
 			return map[string]interface{}{
 				"role": "tool", "tool_call_id": part.ToolResult.ToolCallID, "content": part.ToolResult.Result,
 			}
