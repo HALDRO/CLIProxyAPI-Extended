@@ -522,9 +522,9 @@ func detectLastConversationRole(body []byte) string {
 			}
 
 			switch item.Get("type").String() {
-			case "function_call", "function_call_arguments":
+			case "function_call", "function_call_arguments", "computer_call":
 				return "assistant"
-			case "function_call_output", "function_call_response", "tool_result":
+			case "function_call_output", "function_call_response", "tool_result", "computer_call_output":
 				return "tool"
 			}
 		}
@@ -653,6 +653,7 @@ func normalizeGitHubCopilotChatTools(body []byte) []byte {
 }
 
 func normalizeGitHubCopilotResponsesInput(body []byte) []byte {
+	body = stripGitHubCopilotResponsesUnsupportedFields(body)
 	input := gjson.GetBytes(body, "input")
 	if input.Exists() {
 		// If input is already a string or array, keep it as-is.
@@ -825,6 +826,12 @@ func normalizeGitHubCopilotResponsesInput(body []byte) []byte {
 	return body
 }
 
+func stripGitHubCopilotResponsesUnsupportedFields(body []byte) []byte {
+	// GitHub Copilot /responses rejects service_tier, so always remove it.
+	body, _ = sjson.DeleteBytes(body, "service_tier")
+	return body
+}
+
 func normalizeGitHubCopilotResponsesTools(body []byte) []byte {
 	tools := gjson.GetBytes(body, "tools")
 	if tools.Exists() {
@@ -832,6 +839,10 @@ func normalizeGitHubCopilotResponsesTools(body []byte) []byte {
 		if tools.IsArray() {
 			for _, tool := range tools.Array() {
 				toolType := tool.Get("type").String()
+				if isGitHubCopilotResponsesBuiltinTool(toolType) {
+					filtered, _ = sjson.SetRaw(filtered, "-1", tool.Raw)
+					continue
+				}
 				// Accept OpenAI format (type="function") and Claude format
 				// (no type field, but has top-level name + input_schema).
 				if toolType != "" && toolType != "function" {
@@ -879,6 +890,10 @@ func normalizeGitHubCopilotResponsesTools(body []byte) []byte {
 	}
 	if toolChoice.Type == gjson.JSON {
 		choiceType := toolChoice.Get("type").String()
+		if isGitHubCopilotResponsesBuiltinTool(choiceType) {
+			body, _ = sjson.SetRawBytes(body, "tool_choice", []byte(toolChoice.Raw))
+			return body
+		}
 		if choiceType == "function" {
 			name := toolChoice.Get("name").String()
 			if name == "" {
@@ -894,6 +909,15 @@ func normalizeGitHubCopilotResponsesTools(body []byte) []byte {
 	}
 	body, _ = sjson.SetBytes(body, "tool_choice", "auto")
 	return body
+}
+
+func isGitHubCopilotResponsesBuiltinTool(toolType string) bool {
+	switch strings.TrimSpace(toolType) {
+	case "computer", "computer_use_preview":
+		return true
+	default:
+		return false
+	}
 }
 
 func collectTextFromNode(node gjson.Result) string {
