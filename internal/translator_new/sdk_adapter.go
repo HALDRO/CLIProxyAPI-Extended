@@ -42,18 +42,18 @@ func (a *Adapter) TranslateRequest(ctx context.Context, from, to sdktranslator.F
 	}
 }
 
-func (a *Adapter) TranslateNonStream(ctx context.Context, from, to sdktranslator.Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) (string, error) {
+func (a *Adapter) TranslateNonStream(ctx context.Context, from, to sdktranslator.Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) ([]byte, error) {
 	cfg := a.Cfg
 
 	provider := from.String()
 	translated, err := executor.TranslateResponseNonStreamAuto(cfg, provider, to, bytes.Clone(rawJSON), model)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return string(translated), nil
+	return translated, nil
 }
 
-func (a *Adapter) TranslateStream(ctx context.Context, from, to sdktranslator.Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) ([]string, error) {
+func (a *Adapter) TranslateStream(ctx context.Context, from, to sdktranslator.Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) ([][]byte, error) {
 	cfg := a.Cfg
 	provider := from.String()
 	messageID := "chatcmpl-" + model
@@ -82,9 +82,5 @@ func (a *Adapter) TranslateStream(ctx context.Context, from, to sdktranslator.Fo
 	if err != nil {
 		return nil, err
 	}
-	out := make([]string, 0, len(chunks))
-	for _, c := range chunks {
-		out = append(out, string(c))
-	}
-	return out, nil
+	return chunks, nil
 }

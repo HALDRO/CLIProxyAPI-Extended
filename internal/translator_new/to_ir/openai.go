@@ -124,6 +124,19 @@ func ParseOpenAIRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 		b := v.Bool()
 		req.ParallelToolCalls = &b
 	}
+
+	for _, m := range root.Get("messages").Array() {
+		if req.Metadata == nil {
+			req.Metadata = make(map[string]any)
+		}
+		if cid := m.Get("additional_kwargs.conversationId"); cid.Exists() && strings.TrimSpace(cid.String()) != "" {
+			req.Metadata["conversationId"] = strings.TrimSpace(cid.String())
+		}
+		if contID := m.Get("additional_kwargs.continuationId"); contID.Exists() && strings.TrimSpace(contID.String()) != "" {
+			req.Metadata["continuationId"] = strings.TrimSpace(contID.String())
+		}
+	}
+
 	if mods := root.Get("modalities"); mods.Exists() && mods.IsArray() {
 		for _, m := range mods.Array() {
 			req.ResponseModality = append(req.ResponseModality, strings.ToUpper(m.String()))

@@ -170,16 +170,21 @@ func (s *KiroStreamState) ProcessChunk(rawJSON []byte) ([]ir.UnifiedEvent, error
 	s.parseUsage(parsed)
 	s.parseContextUsage(parsed)
 
-	// Handle reasoningContentEvent (official Kiro thinking mode)
+	var events []ir.UnifiedEvent
+
+	// Handle reasoningContentEvent (official Kiro thinking mode).
+	// Do NOT return early — the same frame may also carry content or tool data.
 	if reasoningEvents := s.processReasoningEvent(parsed); len(reasoningEvents) > 0 {
-		return reasoningEvents, nil
+		events = append(events, reasoningEvents...)
 	}
 
 	if parsed.Get("toolUseId").Exists() && parsed.Get("name").Exists() {
-		return s.processToolEvent(parsed), nil
+		events = append(events, s.processToolEvent(parsed)...)
+		return events, nil
 	}
 
-	return s.processRegularEvents(parsed), nil
+	events = append(events, s.processRegularEvents(parsed)...)
+	return events, nil
 }
 
 func (s *KiroStreamState) parseUsage(parsed gjson.Result) {
@@ -343,34 +348,38 @@ func (s *KiroStreamState) processRegularEvents(parsed gjson.Result) []ir.Unified
 	// Check for reasoningContentEvent nested inside the envelope (e.g. inside
 	// assistantResponseEvent). processReasoningEvent only checks top-level keys,
 	// so nested reasoning would be missed without this.
-	if reasoning := data.Get("reasoningContentEvent"); reasoning.Exists() {
-		content := reasoning.Get("content").String()
-		if content == "" {
-			content = reasoning.Get("text").String()
-		}
-		signature := reasoning.Get("signature").String()
-		if content != "" {
-			s.AccumulatedThinking += content
-			events = append(events, ir.UnifiedEvent{
-				Type:             ir.EventTypeReasoning,
-				Reasoning:        content,
-				ThoughtSignature: signature,
-			})
+	// Skip if data == parsed (top-level) — already handled by processReasoningEvent
+	// in ProcessChunk to avoid duplicate reasoning events.
+	if data.Raw != parsed.Raw {
+		if reasoning := data.Get("reasoningContentEvent"); reasoning.Exists() {
+			content := reasoning.Get("content").String()
+			if content == "" {
+				content = reasoning.Get("text").String()
+			}
+			signature := reasoning.Get("signature").String()
+			if content != "" {
+				s.AccumulatedThinking += content
+				events = append(events, ir.UnifiedEvent{
+					Type:             ir.EventTypeReasoning,
+					Reasoning:        content,
+					ThoughtSignature: signature,
+				})
+			}
 		}
 	}
 
 	if content := data.Get("content").String(); content != "" {
-		// During active reasoning phase (before any real content has been emitted),
-		// skip whitespace-only content chunks (e.g. "\n\n" separators that accompany
-		// reasoningContentEvent frames). Once the content phase has started, whitespace
-		// is meaningful and must be forwarded to avoid breaking formatting.
+		// During active reasoning phase, skip whitespace-only content that arrives
+		// alongside reasoningContentEvent frames (e.g. "\n\n" separators).
+		// Once the first non-whitespace content arrives, all subsequent content
+		// (including whitespace) is forwarded to preserve formatting.
 		if s.AccumulatedThinking != "" && !s.ContentPhaseStarted && strings.TrimSpace(content) == "" {
 			// skip — whitespace-only content during active reasoning phase
 		} else {
 			if strings.TrimSpace(content) != "" {
 				s.ContentPhaseStarted = true
-				s.HasSubstantiveOutput = true
 			}
+			s.HasSubstantiveOutput = true
 			// Process content with thinking tag parsing
 			textEvents, thinkingEvents := s.processContentWithThinking(content)
 			events = append(events, thinkingEvents...)

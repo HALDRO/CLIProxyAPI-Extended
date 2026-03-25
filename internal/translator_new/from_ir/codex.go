@@ -54,8 +54,12 @@ func ToCodexRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 	// Codex expects include reasoning.encrypted_content.
 	m["include"] = []string{"reasoning.encrypted_content"}
 
-	// Codex expects parallel_tool_calls to be true.
-	m["parallel_tool_calls"] = true
+	// Default to parallel tool calls unless explicitly disabled by the client.
+	parallelToolCalls := true
+	if req.ParallelToolCalls != nil {
+		parallelToolCalls = *req.ParallelToolCalls
+	}
+	m["parallel_tool_calls"] = parallelToolCalls
 
 	if req.PreviousResponseID != "" {
 		m["previous_response_id"] = req.PreviousResponseID

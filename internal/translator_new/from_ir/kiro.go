@@ -7,7 +7,10 @@ package from_ir
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
+
+	"github.com/google/uuid"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
 )
@@ -24,10 +27,12 @@ type KiroRequest struct {
 }
 
 type ConversationState struct {
-	ChatTriggerType string           `json:"chatTriggerType"`
-	ConversationId  string           `json:"conversationId"`
-	CurrentMessage  CurrentMessage   `json:"currentMessage"`
-	History         []HistoryMessage `json:"history"` // Can be empty list, but usually not null
+	AgentContinuationId string           `json:"agentContinuationId,omitempty"`
+	AgentTaskType       string           `json:"agentTaskType,omitempty"`
+	ChatTriggerType     string           `json:"chatTriggerType"`
+	ConversationId      string           `json:"conversationId"`
+	CurrentMessage      CurrentMessage   `json:"currentMessage"`
+	History             []HistoryMessage `json:"history"` // Can be empty list, but usually not null
 }
 
 type InferenceConfig struct {
@@ -109,19 +114,26 @@ type ImageSource struct {
 // remoteWebSearchDescription is a minimal fallback for when dynamic fetch from MCP tools/list hasn't completed yet.
 const remoteWebSearchDescription = "WebSearch looks up information outside the model's training data. Supports multiple queries to gather comprehensive information."
 
+const (
+	kiroMinThinkingBudget = 1024
+	kiroMaxThinkingBudget = 24576
+	kiroDefaultBudget     = 20000
+)
+
 // ConvertRequest converts UnifiedChatRequest to Kiro API JSON format.
 func (p *KiroProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 	origin := extractOrigin(req)
 	tools := extractToolsStruct(req.Tools)
+	conversationID := extractConversationID(req)
+	continuationID := extractContinuationID(req)
 
 	systemPrompt := extractSystemPrompt(req.Messages)
+	thinkingHint := buildKiroThinkingHint(req)
 
 	// Inject thinking mode configuration if present.
-	// Kiro/Amazon Q supports official thinking mode via <thinking_mode> tag in system prompt.
+	// Kiro/Amazon Q uses prompt tags rather than structured API fields.
 	// Avoid duplicate injection when client already provided thinking tags.
-	if req.Thinking != nil && (req.Thinking.IncludeThoughts || req.Thinking.Budget > 0) && !hasThinkingConfigTags(systemPrompt) {
-		thinkingHint := `<thinking_mode>enabled</thinking_mode>
-<max_thinking_length>16000</max_thinking_length>`
+	if thinkingHint != "" && !hasThinkingConfigTags(systemPrompt) {
 		if systemPrompt != "" {
 			systemPrompt = thinkingHint + "\n\n" + systemPrompt
 		} else {
@@ -139,11 +151,16 @@ func (p *KiroProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, error
 	// Prepare request struct
 	request := KiroRequest{
 		ConversationState: ConversationState{
+			AgentTaskType:   "vibe",
 			ChatTriggerType: "MANUAL",
-			ConversationId:  ir.GenerateUUID(),
+			ConversationId:  conversationID,
 			CurrentMessage:  currentMsg,
 			History:         history,
 		},
+	}
+
+	if continuationID != "" {
+		request.ConversationState.AgentContinuationId = continuationID
 	}
 
 	if request.ConversationState.History == nil {
@@ -194,6 +211,24 @@ func extractOrigin(req *ir.UnifiedChatRequest) string {
 		}
 	}
 	return "AI_EDITOR"
+}
+
+func extractConversationID(req *ir.UnifiedChatRequest) string {
+	if req != nil && req.Metadata != nil {
+		if id, ok := req.Metadata["conversationId"].(string); ok && strings.TrimSpace(id) != "" {
+			return strings.TrimSpace(id)
+		}
+	}
+	return uuid.New().String()
+}
+
+func extractContinuationID(req *ir.UnifiedChatRequest) string {
+	if req != nil && req.Metadata != nil {
+		if id, ok := req.Metadata["continuationId"].(string); ok && strings.TrimSpace(id) != "" {
+			return strings.TrimSpace(id)
+		}
+	}
+	return ""
 }
 
 func shortenToolNameIfNeeded(name string) string {
@@ -257,7 +292,42 @@ func extractSystemPrompt(messages []ir.Message) string {
 }
 
 func hasThinkingConfigTags(prompt string) bool {
-	return strings.Contains(prompt, "<thinking_mode>") || strings.Contains(prompt, "<max_thinking_length>")
+	return strings.Contains(prompt, "<thinking_mode>") ||
+		strings.Contains(prompt, "<max_thinking_length>") ||
+		strings.Contains(prompt, "<thinking_effort>")
+}
+
+func buildKiroThinkingHint(req *ir.UnifiedChatRequest) string {
+	if req == nil || req.Thinking == nil {
+		return ""
+	}
+	thinking := req.Thinking
+
+	if strings.EqualFold(strings.TrimSpace(thinking.Effort), "none") {
+		return ""
+	}
+
+	if !thinking.IncludeThoughts && thinking.Budget == 0 {
+		return ""
+	}
+
+	budget := normalizeKiroThinkingBudget(thinking.Budget)
+	return `<thinking_mode>enabled</thinking_mode>
+<max_thinking_length>` + budget + `</max_thinking_length>`
+}
+
+func normalizeKiroThinkingBudget(budget int) string {
+	value := budget
+	if value <= 0 {
+		value = kiroDefaultBudget
+	}
+	if value < kiroMinThinkingBudget {
+		value = kiroMinThinkingBudget
+	}
+	if value > kiroMaxThinkingBudget {
+		value = kiroMaxThinkingBudget
+	}
+	return strconv.Itoa(value)
 }
 
 const kiroMaxHistoryMessages = 999

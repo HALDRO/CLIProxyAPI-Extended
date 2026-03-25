@@ -669,9 +669,31 @@ func applyDefaultKiroThinking(req *ir.UnifiedChatRequest) {
 		return
 	}
 
-	req.Thinking = &ir.ThinkingConfig{
-		IncludeThoughts: true,
-		Budget:          16000,
+	// Match the original Kiro executor behavior: only enable thinking when the
+	// client explicitly signals it via model naming or prompt tags that canonical
+	// parsing may not already have converted into req.Thinking.
+	modelLower := strings.ToLower(req.Model)
+	if strings.Contains(modelLower, "thinking") || strings.Contains(modelLower, "-reason") {
+		req.Thinking = &ir.ThinkingConfig{
+			IncludeThoughts: true,
+			Budget:          16000,
+		}
+		return
+	}
+
+	for _, msg := range req.Messages {
+		if msg.Role != ir.RoleSystem {
+			continue
+		}
+		text := ir.CombineTextParts(msg)
+		if strings.Contains(text, "<thinking_mode>enabled</thinking_mode>") ||
+			strings.Contains(text, "<thinking_mode>interleaved</thinking_mode>") {
+			req.Thinking = &ir.ThinkingConfig{
+				IncludeThoughts: true,
+				Budget:          16000,
+			}
+			return
+		}
 	}
 }
 
@@ -1181,20 +1203,24 @@ func (e *KiroExecutorV2) processStream(ctx context.Context, resp *http.Response,
 		return
 	}
 	if state.AccumulatedThinking != "" && !state.HasSubstantiveOutput {
-		err := fmt.Errorf("kiro-v2: upstream stream ended after reasoning without final answer content")
-		log.Warn(err.Error())
-		select {
-		case <-ctx.Done():
-			return
-		case out <- cliproxyexecutor.StreamChunk{Err: err}:
-		}
-		return
+		// Upstream ended after reasoning without producing answer content.
+		// This is a valid scenario (model exhausted output budget during thinking,
+		// upstream timeout, etc.). Log it but do NOT treat as error — send a
+		// normal finish event so the client receives a proper stream termination
+		// with finish_reason and [DONE] instead of a broken/hanging stream.
+		log.Warnf("kiro-v2: upstream stream ended after reasoning without final answer content (thinking_len=%d)", len(state.AccumulatedThinking))
 	}
 
 	// Build finish event with usage
+	finishReason := state.DetermineFinishReason()
+	// If we only got reasoning and no content, the model likely hit its output
+	// limit during the thinking phase.
+	if state.AccumulatedThinking != "" && !state.HasSubstantiveOutput && len(state.ToolCalls) == 0 {
+		finishReason = ir.FinishReasonLength
+	}
 	finish := ir.UnifiedEvent{
 		Type:         ir.EventTypeFinish,
-		FinishReason: state.DetermineFinishReason(),
+		FinishReason: finishReason,
 		Usage:        state.Usage,
 	}
 

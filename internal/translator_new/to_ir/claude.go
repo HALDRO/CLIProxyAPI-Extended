@@ -156,6 +156,11 @@ func ParseClaudeRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 			}
 			req.FunctionCalling = fc
 		}
+		// Claude sends disable_parallel_tool_use inside tool_choice object.
+		if disableParallel := tc.Get("disable_parallel_tool_use"); disableParallel.Exists() {
+			val := !disableParallel.Bool()
+			req.ParallelToolCalls = &val
+		}
 	}
 
 	// Thinking/Reasoning config

@@ -14,8 +14,8 @@ import (
 // from the application entrypoint without sdk/translator importing internal/ packages.
 type CanonicalAdapter interface {
 	TranslateRequest(ctx context.Context, from, to Format, model string, rawJSON []byte, stream bool) ([]byte, error)
-	TranslateNonStream(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) (string, error)
-	TranslateStream(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) ([]string, error)
+	TranslateNonStream(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) ([]byte, error)
+	TranslateStream(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) ([][]byte, error)
 }
 
 var canonicalEnabled atomic.Bool
@@ -55,11 +55,11 @@ func TranslateRequestE(ctx context.Context, from, to Format, model string, rawJS
 
 // TranslateNonStreamE is like TranslateNonStream but returns an error.
 // When canonical mode is enabled, it requires a configured CanonicalAdapter and never falls back.
-func TranslateNonStreamE(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) (string, error) {
+func TranslateNonStreamE(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) ([]byte, error) {
 	if canonicalEnabled.Load() {
 		ad, ok := getCanonicalAdapter()
 		if !ok {
-			return "", errCanonicalNotConfigured
+			return nil, errCanonicalNotConfigured
 		}
 		return ad.TranslateNonStream(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)
 	}
@@ -68,7 +68,7 @@ func TranslateNonStreamE(ctx context.Context, from, to Format, model string, ori
 
 // TranslateStreamE is like TranslateStream but returns an error.
 // When canonical mode is enabled, it requires a configured CanonicalAdapter and never falls back.
-func TranslateStreamE(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) ([]string, error) {
+func TranslateStreamE(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) ([][]byte, error) {
 	if canonicalEnabled.Load() {
 		ad, ok := getCanonicalAdapter()
 		if !ok {
