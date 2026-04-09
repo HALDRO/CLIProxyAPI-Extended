@@ -9,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/from_ir"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/to_ir"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -28,11 +29,12 @@ type UnifiedStreamState struct {
 	HasContent          bool         // Track if any actual content was output
 
 	// Logic Handling
-	ToolCallIndex     int               // Current linear index for tool calls (0, 1, 2...)
-	ToolCallIDToIndex map[string]int    // Maps tool call ID -> assigned index
-	FinishSent        bool              // Track if finish event was already sent
-	ToolCallIDMap     map[string]string // Maps item_id -> call_id (specific to OpenAI Responses API input)
-	OutputIndexMap    map[int]int       // Maps source output_index -> target tool_index
+	ToolCallIndex        int               // Current linear index for tool calls (0, 1, 2...)
+	ToolCallIDToIndex    map[string]int    // Maps tool call ID -> assigned index
+	FinishSent           bool              // Track if finish event was already sent
+	ToolCallIDMap        map[string]string // Maps item_id -> call_id (specific to OpenAI Responses API input)
+	OutputIndexMap       map[int]int       // Maps source output_index -> target tool_index
+	SanitizedToolNameMap map[string]string // Maps sanitized Gemini function name -> original client tool name
 }
 
 // EnsureInitialized initializes maps and substructures if they are nil.
@@ -63,6 +65,7 @@ type OpenAIStreamState = UnifiedStreamState
 func NewAntigravityStreamState(originalRequest []byte) *UnifiedStreamState {
 	s := &UnifiedStreamState{}
 	s.EnsureInitialized()
+	s.SanitizedToolNameMap = util.SanitizedToolNameMap(originalRequest)
 	return s
 }
 
@@ -348,7 +351,14 @@ func convertUnifiedEventsToChunks(events []ir.UnifiedEvent, to sdktranslator.For
 				state.ReasoningCharsAccum += len(event.Reasoning)
 			}
 
-			// 2. Handle Tool Call Identity Mapping (Responses API -> OpenAI quirk)
+			// 2. Restore sanitized tool names from Gemini/Antigravity responses
+			//    Gemini API requires sanitized function names (no special chars),
+			//    so we restore original client-facing names before emitting to client.
+			if event.ToolCall != nil && len(state.SanitizedToolNameMap) > 0 {
+				event.ToolCall.Name = util.RestoreSanitizedToolName(state.SanitizedToolNameMap, event.ToolCall.Name)
+			}
+
+			// 3. Handle Tool Call Identity Mapping (Responses API -> OpenAI quirk)
 			//    Only relevant if input events have ItemID but no CallID (OpenAI input),
 			//    but harmless for others.
 			if event.ToolCall != nil {
@@ -503,11 +513,14 @@ func convertUnifiedEventsToChunks(events []ir.UnifiedEvent, to sdktranslator.For
 // =========================================================================================
 
 // TranslateAntigravityResponseNonStream handles Antigravity response.
-func TranslateAntigravityResponseNonStream(cfg *config.Config, to sdktranslator.Format, resp []byte, model string) ([]byte, error) {
+func TranslateAntigravityResponseNonStream(cfg *config.Config, to sdktranslator.Format, resp []byte, model string, sanitizedToolNameMap map[string]string) ([]byte, error) {
 	messages, usage, meta, err := to_ir.ParseAntigravityResponseMeta(resp)
 	if err != nil {
 		return nil, err
 	}
+
+	// Restore sanitized tool names in response messages
+	restoreSanitizedToolNames(messages, sanitizedToolNameMap)
 
 	messageID := "chatcmpl-" + model
 	if meta != nil && meta.ResponseID != "" {
@@ -622,12 +635,12 @@ func TranslateResponseNonStreamAuto(cfg *config.Config, provider string, to sdkt
 	case "gemini-cli":
 		translated, err = TranslateGeminiCLIResponseNonStream(cfg, to, resp, model)
 	case "antigravity":
-		translated, err = TranslateAntigravityResponseNonStream(cfg, to, resp, model)
+		translated, err = TranslateAntigravityResponseNonStream(cfg, to, resp, model, nil)
 	case "gemini", "aistudio":
 		translated, err = TranslateGeminiResponseNonStream(cfg, to, resp, model)
 	case "claude":
 		translated, err = TranslateClaudeResponseNonStream(cfg, to, resp, model)
-	case "openai", "openai-response", "ollama":
+	case "openai", "openai-response", "ollama", "codebuddy", "cursor":
 		translated, err = TranslateOpenAIResponseNonStream(cfg, to, resp, model)
 	case "codex":
 		messages, usage, err := to_ir.ParseCodexResponse(resp)
@@ -661,7 +674,7 @@ func TranslateResponseStreamAuto(cfg *config.Config, provider string, to sdktran
 		chunks, err = TranslateAntigravityResponseStream(cfg, to, chunk, model, msgID, unifiedState)
 	case "gemini", "aistudio":
 		chunks, err = TranslateGeminiResponseStream(cfg, to, chunk, model, msgID, unifiedState)
-	case "openai", "openai-response", "ollama":
+	case "openai", "openai-response", "ollama", "codebuddy", "cursor":
 		chunks, err = TranslateOpenAIResponseStream(cfg, to, chunk, model, msgID, unifiedState)
 	case "claude":
 		// Claude wrapper still uses specific state type for consistency with parser
@@ -767,4 +780,18 @@ func TranslateOpenAIResponseStreamForced(to sdktranslator.Format, chunk []byte, 
 
 func TranslateOpenAIResponseNonStreamForced(to sdktranslator.Format, resp []byte, model string) ([]byte, error) {
 	return TranslateOpenAIResponseNonStream(nil, to, resp, model)
+}
+
+// restoreSanitizedToolNames restores sanitized Gemini function names back to
+// original client-facing names in IR messages. This is needed because Gemini API
+// requires sanitized names (no special chars), but clients expect original names.
+func restoreSanitizedToolNames(messages []ir.Message, nameMap map[string]string) {
+	if len(nameMap) == 0 {
+		return
+	}
+	for i := range messages {
+		for j := range messages[i].ToolCalls {
+			messages[i].ToolCalls[j].Name = util.RestoreSanitizedToolName(nameMap, messages[i].ToolCalls[j].Name)
+		}
+	}
 }

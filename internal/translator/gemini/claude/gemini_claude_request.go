@@ -6,11 +6,12 @@
 package claude
 
 import (
-	"bytes"
+	"fmt"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -30,8 +31,6 @@ const geminiClaudeThoughtSignature = "skip_thought_signature_validator"
 //   - []byte: The transformed request in Gemini CLI format.
 func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := inputRawJSON
-	rawJSON = bytes.Replace(rawJSON, []byte(`"url":{"type":"string","format":"uri",`), []byte(`"url":{"type":"string",`), -1)
-
 	// Build output Gemini CLI request JSON
 	out := []byte(`{"contents":[]}`)
 	out, _ = sjson.SetBytes(out, "model", modelName)
@@ -90,6 +89,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 								functionName = derived
 							}
 						}
+						functionName = util.SanitizeFunctionName(functionName)
 						functionArgs := contentResult.Get("input").String()
 						argsResult := gjson.Parse(functionArgs)
 						if argsResult.IsObject() && gjson.Valid(functionArgs) {
@@ -109,6 +109,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						if funcName == "" {
 							funcName = toolCallID
 						}
+						funcName = util.SanitizeFunctionName(funcName)
 						responseData := contentResult.Get("content").Raw
 						part := []byte(`{"functionResponse":{"name":"","response":{"result":""}}}`)
 						part, _ = sjson.SetBytes(part, "functionResponse.name", funcName)
@@ -143,13 +144,37 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		})
 	}
 
+	// strip trailing model turn with unanswered function calls —
+	// Gemini returns empty responses when the last turn is a model
+	// functionCall with no corresponding user functionResponse.
+	contents := gjson.GetBytes(out, "contents")
+	if contents.Exists() && contents.IsArray() {
+		arr := contents.Array()
+		if len(arr) > 0 {
+			last := arr[len(arr)-1]
+			if last.Get("role").String() == "model" {
+				hasFC := false
+				last.Get("parts").ForEach(func(_, part gjson.Result) bool {
+					if part.Get("functionCall").Exists() {
+						hasFC = true
+						return false
+					}
+					return true
+				})
+				if hasFC {
+					out, _ = sjson.DeleteBytes(out, fmt.Sprintf("contents.%d", len(arr)-1))
+				}
+			}
+		}
+	}
+
 	// tools
 	if toolsResult := gjson.GetBytes(rawJSON, "tools"); toolsResult.IsArray() {
 		hasTools := false
 		toolsResult.ForEach(func(_, toolResult gjson.Result) bool {
 			inputSchemaResult := toolResult.Get("input_schema")
 			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {
-				inputSchema := inputSchemaResult.Raw
+				inputSchema := util.CleanJSONSchemaForGemini(inputSchemaResult.Raw)
 				tool := []byte(toolResult.Raw)
 				var err error
 				tool, err = sjson.DeleteBytes(tool, "input_schema")
@@ -165,6 +190,8 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				tool, _ = sjson.DeleteBytes(tool, "type")
 				tool, _ = sjson.DeleteBytes(tool, "cache_control")
 				tool, _ = sjson.DeleteBytes(tool, "defer_loading")
+				tool, _ = sjson.DeleteBytes(tool, "eager_input_streaming")
+				tool, _ = sjson.SetBytes(tool, "name", util.SanitizeFunctionName(gjson.GetBytes(tool, "name").String()))
 				if gjson.ValidBytes(tool) && gjson.ParseBytes(tool).IsObject() {
 					if !hasTools {
 						out, _ = sjson.SetRawBytes(out, "tools", []byte(`[{"functionDeclarations":[]}]`))
@@ -202,7 +229,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		case "tool":
 			out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.mode", "ANY")
 			if toolChoiceName != "" {
-				out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.allowedFunctionNames", []string{toolChoiceName})
+				out, _ = sjson.SetBytes(out, "toolConfig.functionCallingConfig.allowedFunctionNames", []string{util.SanitizeFunctionName(toolChoiceName)})
 			}
 		}
 	}

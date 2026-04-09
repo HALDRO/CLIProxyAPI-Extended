@@ -25,6 +25,10 @@ remote-management:
   # Disable the bundled management control panel asset download and HTTP route when true.
   disable-control-panel: false
 
+  # Disable automatic periodic background updates of the management panel from GitHub (default: false).
+  # When enabled, the panel is only downloaded on first access if missing, and never auto-updated afterward.
+  # disable-auto-update-panel: false
+
   # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
   panel-github-repository: 'https://github.com/router-for-me/Cli-Proxy-API-Management-Center'
 
@@ -108,6 +112,7 @@ max-retry-interval: 30
 quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
   switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
+  antigravity-credits: true # Whether to retry Antigravity quota_exhausted 429s once with enabledCreditTypes=["GOOGLE_ONE_AI"]
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
@@ -129,6 +134,10 @@ disable-auth: false
 # safety settings, image config, payload overrides) internally for cleaner architecture.
 # Default: true (enabled)
 use-canonical-translator: true
+
+# When true, enable Gemini CLI internal endpoints (/v1internal:*).
+# Default is false for safety.
+enable-gemini-cli-endpoint: false
 
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
 nonstream-keepalive-interval: 0
@@ -209,14 +218,23 @@ nonstream-keepalive-interval: 0
 #         - "API"
 #         - "proxy"
 #       cache-user-id: true          # optional: default is false; set true to reuse cached user_id per API key instead of generating a random one each request
+#     experimental-cch-signing: false # optional: default is false; when true, sign the final /v1/messages body using the current Claude Code cch algorithm
+#                                     # keep this disabled unless you explicitly need the behavior, so upstream seed changes fall back to legacy proxy behavior
 
 # Default headers for Claude API requests. Update when Claude Code releases new versions.
-# These are used as fallbacks when the client does not send its own headers.
+# In legacy mode, user-agent/package-version/runtime-version/timeout are used as fallbacks
+# when the client omits them, while OS/arch remain runtime-derived. When
+# stabilize-device-profile is enabled, OS/arch stay pinned to the baseline values below,
+# while user-agent/package-version/runtime-version seed a software fingerprint that can
+# still upgrade to newer official Claude client versions.
 # claude-header-defaults:
 #   user-agent: "claude-cli/2.1.44 (external, sdk-cli)"
 #   package-version: "0.74.0"
 #   runtime-version: "v24.3.0"
+#   os: "MacOS"
+#   arch: "arm64"
 #   timeout: "600"
+#   stabilize-device-profile: false  # optional, default false; set true to enable per-auth/API-key fingerprint pinning
 
 # Default headers for Codex OAuth model requests.
 # These are used only for file-backed/OAuth Codex requests when the client
@@ -267,7 +285,9 @@ nonstream-keepalive-interval: 0
 #       - api-key: "sk-or-v1-...b781" # without proxy-url
 #     models: # The models supported by the provider.
 #       - name: "moonshotai/kimi-k2:free" # The actual model name.
-#         alias: "kimi-k2" # The alias used in the API.
+#         alias: "kimi-k2"               # The alias used in the API.
+#         thinking:                      # optional: omit to default to levels ["low","medium","high"]
+#           levels: ["low", "medium", "high"]
 #       # You may repeat the same alias to build an internal model pool.
 #       # The client still sees only one alias in the model list.
 #       # Requests to that alias will round-robin across the upstream names below,
@@ -336,6 +356,10 @@ nonstream-keepalive-interval: 0
 # These aliases rename model IDs for both model listing and request routing.
 # Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kiro, github-copilot, kimi.
 # NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, or ampcode.
+# NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
+# client-visible names can become ambiguous across providers. /api/provider/{provider}/... helps
+# you select the protocol surface, but inference backend selection can still follow the resolved
+# model/alias. For strict backend pinning, use unique aliases/prefixes or avoid overlapping names.
 # You can repeat the same name with different aliases to expose multiple client model names.
 # oauth-model-alias:
 #  antigravity:

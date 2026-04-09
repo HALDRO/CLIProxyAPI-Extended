@@ -6,7 +6,6 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -14,15 +13,17 @@ import (
 	"io"
 	"net/http"
 	"net/textproto"
-	"runtime"
 	"strings"
 	"time"
 
 	"github.com/andybalholm/brotli"
+	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -44,6 +45,10 @@ type ClaudeExecutor struct {
 // claudeToolPrefix is empty to match real Claude Code behavior (no tool name prefix).
 // Previously "proxy_" was used but this is a detectable fingerprint difference.
 const claudeToolPrefix = ""
+
+// Anthropic-compatible upstreams may reject or even crash when Claude models
+// omit max_tokens. Prefer registered model metadata before using a fallback.
+const defaultModelMaxTokens = 1024
 
 func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecutor{cfg: cfg} }
 
@@ -87,7 +92,7 @@ func (e *ClaudeExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Aut
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
 		return nil, err
 	}
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewUtlsHTTPClient(e.cfg, auth, 0)
 	return httpClient.Do(httpReq)
 }
 
@@ -102,8 +107,8 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		baseURL = "https://api.anthropic.com"
 	}
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
 	// Use streaming translation to preserve function calling, except for claude.
@@ -126,11 +131,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// based on client type and configuration.
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
 
-	requestedModel := payloadRequestedModel(opts, req.Model)
-	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body = ensureModelMaxTokens(body, baseModel)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
+	body = normalizeClaudeTemperatureForThinking(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
@@ -154,6 +161,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
+	if experimentalCCHSigningEnabled(e.cfg, auth) {
+		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
+	}
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
@@ -167,7 +177,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
@@ -179,33 +189,33 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		AuthValue: authValue,
 	})
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewUtlsHTTPClient(e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		// Decompress error responses — pass the Content-Encoding value (may be empty)
 		// and let decodeResponseBody handle both header-declared and magic-byte-detected
 		// compression.  This keeps error-path behaviour consistent with the success path.
 		errBody, decErr := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
 		if decErr != nil {
-			recordAPIResponseError(ctx, e.cfg, decErr)
+			helps.RecordAPIResponseError(ctx, e.cfg, decErr)
 			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
-			logWithRequestID(ctx).Warn(msg)
+			helps.LogWithRequestID(ctx).Warn(msg)
 			return resp, statusErr{code: httpResp.StatusCode, msg: msg}
 		}
 		b, readErr := io.ReadAll(errBody)
 		if readErr != nil {
-			recordAPIResponseError(ctx, e.cfg, readErr)
+			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
 			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
-			logWithRequestID(ctx).Warn(msg)
+			helps.LogWithRequestID(ctx).Warn(msg)
 			b = []byte(msg)
 		}
-		appendAPIResponseChunk(ctx, e.cfg, b)
-		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
@@ -214,7 +224,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
@@ -227,19 +237,19 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}()
 	data, err := io.ReadAll(decodedBody)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
-	appendAPIResponseChunk(ctx, e.cfg, data)
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if stream {
 		lines := bytes.Split(data, []byte("\n"))
 		for _, line := range lines {
-			if detail, ok := parseClaudeStreamUsage(line); ok {
-				reporter.publish(ctx, detail)
+			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
+				reporter.Publish(ctx, detail)
 			}
 		}
 	} else {
-		reporter.publish(ctx, parseClaudeUsage(data))
+		reporter.Publish(ctx, helps.ParseClaudeUsage(data))
 	}
 	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 		data = stripClaudeToolPrefixFromResponse(data, claudeToolPrefix)
@@ -273,8 +283,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		baseURL = "https://api.anthropic.com"
 	}
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
 	originalPayloadSource := req.Payload
@@ -295,11 +305,13 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// based on client type and configuration.
 	body = applyCloaking(ctx, e.cfg, auth, body, baseModel, apiKey)
 
-	requestedModel := payloadRequestedModel(opts, req.Model)
-	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body = ensureModelMaxTokens(body, baseModel)
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
+	body = normalizeClaudeTemperatureForThinking(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
@@ -320,6 +332,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
+	if experimentalCCHSigningEnabled(e.cfg, auth) {
+		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
+	}
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
@@ -333,7 +348,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
@@ -345,33 +360,33 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		AuthValue: authValue,
 	})
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewUtlsHTTPClient(e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		// Decompress error responses — pass the Content-Encoding value (may be empty)
 		// and let decodeResponseBody handle both header-declared and magic-byte-detected
 		// compression.  This keeps error-path behaviour consistent with the success path.
 		errBody, decErr := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
 		if decErr != nil {
-			recordAPIResponseError(ctx, e.cfg, decErr)
+			helps.RecordAPIResponseError(ctx, e.cfg, decErr)
 			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
-			logWithRequestID(ctx).Warn(msg)
+			helps.LogWithRequestID(ctx).Warn(msg)
 			return nil, statusErr{code: httpResp.StatusCode, msg: msg}
 		}
 		b, readErr := io.ReadAll(errBody)
 		if readErr != nil {
-			recordAPIResponseError(ctx, e.cfg, readErr)
+			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
 			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
-			logWithRequestID(ctx).Warn(msg)
+			helps.LogWithRequestID(ctx).Warn(msg)
 			b = []byte(msg)
 		}
-		appendAPIResponseChunk(ctx, e.cfg, b)
-		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
@@ -380,7 +395,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
@@ -401,9 +416,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			scanner.Buffer(nil, 52_428_800) // 50MB
 			for scanner.Scan() {
 				line := scanner.Bytes()
-				appendAPIResponseChunk(ctx, e.cfg, line)
-				if detail, ok := parseClaudeStreamUsage(line); ok {
-					reporter.publish(ctx, detail)
+				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
+					reporter.Publish(ctx, detail)
 				}
 				if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 					line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
@@ -415,8 +430,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				out <- cliproxyexecutor.StreamChunk{Payload: cloned}
 			}
 			if errScan := scanner.Err(); errScan != nil {
-				recordAPIResponseError(ctx, e.cfg, errScan)
-				reporter.publishFailure(ctx)
+				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+				reporter.PublishFailure(ctx)
 				out <- cliproxyexecutor.StreamChunk{Err: errScan}
 			}
 			return
@@ -428,9 +443,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()
-			appendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := parseClaudeStreamUsage(line); ok {
-				reporter.publish(ctx, detail)
+			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
+				reporter.Publish(ctx, detail)
 			}
 			if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 				line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
@@ -446,7 +461,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				&param,
 			)
 			if err != nil {
-				reporter.publishFailure(ctx)
+				reporter.PublishFailure(ctx)
 				out <- cliproxyexecutor.StreamChunk{Err: err}
 				return
 			}
@@ -455,8 +470,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
-			recordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.publishFailure(ctx)
+			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+			reporter.PublishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
 		}
 	}()
@@ -505,7 +520,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       url,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
@@ -517,32 +532,32 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		AuthValue: authValue,
 	})
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewUtlsHTTPClient(e.cfg, auth, 0)
 	resp, err := httpClient.Do(httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return cliproxyexecutor.Response{}, err
 	}
-	recordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		// Decompress error responses — pass the Content-Encoding value (may be empty)
 		// and let decodeResponseBody handle both header-declared and magic-byte-detected
 		// compression.  This keeps error-path behaviour consistent with the success path.
 		errBody, decErr := decodeResponseBody(resp.Body, resp.Header.Get("Content-Encoding"))
 		if decErr != nil {
-			recordAPIResponseError(ctx, e.cfg, decErr)
+			helps.RecordAPIResponseError(ctx, e.cfg, decErr)
 			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
-			logWithRequestID(ctx).Warn(msg)
+			helps.LogWithRequestID(ctx).Warn(msg)
 			return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: msg}
 		}
 		b, readErr := io.ReadAll(errBody)
 		if readErr != nil {
-			recordAPIResponseError(ctx, e.cfg, readErr)
+			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
 			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
-			logWithRequestID(ctx).Warn(msg)
+			helps.LogWithRequestID(ctx).Warn(msg)
 			b = []byte(msg)
 		}
-		appendAPIResponseChunk(ctx, e.cfg, b)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
@@ -550,7 +565,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	decodedBody, err := decodeResponseBody(resp.Body, resp.Header.Get("Content-Encoding"))
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		if errClose := resp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
@@ -563,10 +578,10 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}()
 	data, err := io.ReadAll(decodedBody)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return cliproxyexecutor.Response{}, err
 	}
-	appendAPIResponseChunk(ctx, e.cfg, data)
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	count := gjson.GetBytes(data, "input_tokens").Int()
 	out := sdktranslator.TranslateTokenCount(ctx, to, from, count, data)
 	return cliproxyexecutor.Response{Payload: out, Headers: resp.Header.Clone()}, nil
@@ -642,6 +657,25 @@ func disableThinkingIfToolChoiceForced(body []byte) []byte {
 		if oc := gjson.GetBytes(body, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
 			body, _ = sjson.DeleteBytes(body, "output_config")
 		}
+	}
+	return body
+}
+
+// normalizeClaudeTemperatureForThinking keeps Anthropic message requests valid when
+// thinking is enabled. Anthropic rejects temperatures other than 1 when
+// thinking.type is enabled/adaptive/auto.
+func normalizeClaudeTemperatureForThinking(body []byte) []byte {
+	if !gjson.GetBytes(body, "temperature").Exists() {
+		return body
+	}
+
+	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
+	switch thinkingType {
+	case "enabled", "adaptive", "auto":
+		if temp := gjson.GetBytes(body, "temperature"); temp.Exists() && temp.Type == gjson.Number && temp.Float() == 1 {
+			return body
+		}
+		body, _ = sjson.SetBytes(body, "temperature", 1)
 	}
 	return body
 }
@@ -775,36 +809,6 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 	return body, nil
 }
 
-// mapStainlessOS maps runtime.GOOS to Stainless SDK OS names.
-func mapStainlessOS() string {
-	switch runtime.GOOS {
-	case "darwin":
-		return "MacOS"
-	case "windows":
-		return "Windows"
-	case "linux":
-		return "Linux"
-	case "freebsd":
-		return "FreeBSD"
-	default:
-		return "Other::" + runtime.GOOS
-	}
-}
-
-// mapStainlessArch maps runtime.GOARCH to Stainless SDK architecture names.
-func mapStainlessArch() string {
-	switch runtime.GOARCH {
-	case "amd64":
-		return "x64"
-	case "arm64":
-		return "arm64"
-	case "386":
-		return "x86"
-	default:
-		return "other::" + runtime.GOARCH
-	}
-}
-
 func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config) {
 	hdrDefault := func(cfgVal, fallback string) string {
 		if cfgVal != "" {
@@ -832,8 +836,13 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 		ginHeaders = ginCtx.Request.Header
 	}
+	stabilizeDeviceProfile := helps.ClaudeDeviceProfileStabilizationEnabled(cfg)
+	var deviceProfile helps.ClaudeDeviceProfile
+	if stabilizeDeviceProfile {
+		deviceProfile = helps.ResolveClaudeDeviceProfile(auth, apiKey, ginHeaders, cfg)
+	}
 
-	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
+	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28"
 	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
 		baseBetas = val
 		if !strings.Contains(val, "oauth") {
@@ -844,6 +853,14 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	hasClaude1MHeader := false
 	if ginHeaders != nil {
 		if _, ok := ginHeaders[textproto.CanonicalMIMEHeaderKey("X-CPA-CLAUDE-1M")]; ok {
+			hasClaude1MHeader = true
+		}
+	}
+	// Also check auth attributes — GitLab Duo sets gitlab_duo_force_context_1m
+	// when routing through the Anthropic gateway, but the gin headers won't have
+	// X-CPA-CLAUDE-1M because the request is internally constructed.
+	if !hasClaude1MHeader && auth != nil && auth.Attributes != nil {
+		if auth.Attributes["gitlab_duo_force_context_1m"] == "true" {
 			hasClaude1MHeader = true
 		}
 	}
@@ -871,28 +888,21 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	r.Header.Set("Anthropic-Beta", baseBetas)
 
 	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Version", "2023-06-01")
-	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
+	// Only set browser access header for API key mode; real Claude Code CLI does not send it.
+	if useAPIKey {
+		misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
+	}
 	misc.EnsureHeader(r.Header, ginHeaders, "X-App", "cli")
 	// Values below match Claude Code 2.1.63 / @anthropic-ai/sdk 0.74.0 (updated 2026-02-28).
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Retry-Count", "0")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Runtime-Version", hdrDefault(hd.RuntimeVersion, "v24.3.0"))
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Package-Version", hdrDefault(hd.PackageVersion, "0.74.0"))
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Runtime", "node")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Lang", "js")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Arch", mapStainlessArch())
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Os", mapStainlessOS())
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Timeout", hdrDefault(hd.Timeout, "600"))
-	// For User-Agent, only forward the client's header if it's already a Claude Code client.
-	// Non-Claude-Code clients (e.g. curl, OpenAI SDKs) get the default Claude Code User-Agent
-	// to avoid leaking the real client identity during cloaking.
-	clientUA := ""
-	if ginHeaders != nil {
-		clientUA = ginHeaders.Get("User-Agent")
-	}
-	if isClaudeCodeClient(clientUA) {
-		r.Header.Set("User-Agent", clientUA)
-	} else {
-		r.Header.Set("User-Agent", hdrDefault(hd.UserAgent, "claude-cli/2.1.63 (external, cli)"))
+	// Session ID: stable per auth/apiKey, matches Claude Code's X-Claude-Code-Session-Id header.
+	misc.EnsureHeader(r.Header, ginHeaders, "X-Claude-Code-Session-Id", helps.CachedSessionID(apiKey))
+	// Per-request UUID, matches Claude Code's x-client-request-id for first-party API.
+	if isAnthropicBase {
+		misc.EnsureHeader(r.Header, ginHeaders, "x-client-request-id", uuid.New().String())
 	}
 	r.Header.Set("Connection", "keep-alive")
 	if stream {
@@ -905,8 +915,14 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		r.Header.Set("Accept", "application/json")
 		r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	}
-	// Keep OS/Arch mapping dynamic (not configurable).
-	// They intentionally continue to derive from runtime.GOOS/runtime.GOARCH.
+	// Legacy mode keeps OS/Arch runtime-derived; stabilized mode pins OS/Arch
+	// to the configured baseline while still allowing newer official
+	// User-Agent/package/runtime tuples to upgrade the software fingerprint.
+	if stabilizeDeviceProfile {
+		helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile)
+	} else {
+		helps.ApplyClaudeLegacyDeviceHeaders(r, ginHeaders, cfg)
+	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -937,7 +953,7 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 }
 
 func checkSystemInstructions(payload []byte) []byte {
-	return checkSystemInstructionsWithMode(payload, false)
+	return checkSystemInstructionsWithSigningMode(payload, false, false, "2.1.63", "", "")
 }
 
 func isClaudeOAuthToken(apiKey string) bool {
@@ -1081,7 +1097,7 @@ func stripClaudeToolPrefixFromStreamLine(line []byte, prefix string) []byte {
 	if prefix == "" {
 		return line
 	}
-	payload := jsonPayload(line)
+	payload := helps.JSONPayload(line)
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return line
 	}
@@ -1132,6 +1148,38 @@ func getClientUserAgent(ctx context.Context) string {
 	return ""
 }
 
+// parseEntrypointFromUA extracts the entrypoint from a Claude Code User-Agent.
+// Format: "claude-cli/x.y.z (external, cli)" → "cli"
+// Format: "claude-cli/x.y.z (external, vscode)" → "vscode"
+// Returns "cli" if parsing fails or UA is not Claude Code.
+func parseEntrypointFromUA(userAgent string) string {
+	// Find content inside parentheses
+	start := strings.Index(userAgent, "(")
+	end := strings.LastIndex(userAgent, ")")
+	if start < 0 || end <= start {
+		return "cli"
+	}
+	inner := userAgent[start+1 : end]
+	// Split by comma, take the second part (entrypoint is at index 1, after USER_TYPE)
+	// Format: "(USER_TYPE, ENTRYPOINT[, extra...])"
+	parts := strings.Split(inner, ",")
+	if len(parts) >= 2 {
+		ep := strings.TrimSpace(parts[1])
+		if ep != "" {
+			return ep
+		}
+	}
+	return "cli"
+}
+
+// getWorkloadFromContext extracts workload identifier from the gin request headers.
+func getWorkloadFromContext(ctx context.Context) string {
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		return strings.TrimSpace(ginCtx.GetHeader("X-CPA-Claude-Workload"))
+	}
+	return ""
+}
+
 // getCloakConfigFromAuth extracts cloak configuration from auth attributes.
 // Returns (cloakMode, strictMode, sensitiveWords, cacheUserID).
 func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string, bool) {
@@ -1159,43 +1207,14 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (string, bool, []string, bo
 	return cloakMode, strictMode, sensitiveWords, cacheUserID
 }
 
-// resolveClaudeKeyCloakConfig finds the matching ClaudeKey config and returns its CloakConfig.
-func resolveClaudeKeyCloakConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config.CloakConfig {
-	if cfg == nil || auth == nil {
-		return nil
-	}
-
-	apiKey, baseURL := claudeCreds(auth)
-	if apiKey == "" {
-		return nil
-	}
-
-	for i := range cfg.ClaudeKey {
-		entry := &cfg.ClaudeKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-
-		// Match by API key
-		if strings.EqualFold(cfgKey, apiKey) {
-			// If baseURL is specified, also check it
-			if baseURL != "" && cfgBase != "" && !strings.EqualFold(cfgBase, baseURL) {
-				continue
-			}
-			return entry.Cloak
-		}
-	}
-
-	return nil
-}
-
 // injectFakeUserID generates and injects a fake user ID into the request metadata.
 // When useCache is false, a new user ID is generated for every call.
 func injectFakeUserID(payload []byte, apiKey string, useCache bool) []byte {
 	generateID := func() string {
 		if useCache {
-			return cachedUserID(apiKey)
+			return helps.CachedUserID(apiKey)
 		}
-		return generateFakeUserID()
+		return helps.GenerateFakeUserID()
 	}
 
 	metadata := gjson.GetBytes(payload, "metadata")
@@ -1205,38 +1224,84 @@ func injectFakeUserID(payload []byte, apiKey string, useCache bool) []byte {
 	}
 
 	existingUserID := gjson.GetBytes(payload, "metadata.user_id").String()
-	if existingUserID == "" || !isValidUserID(existingUserID) {
+	if existingUserID == "" || !helps.IsValidUserID(existingUserID) {
 		payload, _ = sjson.SetBytes(payload, "metadata.user_id", generateID())
 	}
 	return payload
 }
 
-// generateBillingHeader creates the x-anthropic-billing-header text block that
-// real Claude Code prepends to every system prompt array.
-// Format: x-anthropic-billing-header: cc_version=<ver>.<build>; cc_entrypoint=cli; cch=<hash>;
-func generateBillingHeader(payload []byte) string {
-	// Generate a deterministic cch hash from the payload content (system + messages + tools).
-	// Real Claude Code uses a 5-char hex hash that varies per request.
-	h := sha256.Sum256(payload)
-	cch := hex.EncodeToString(h[:])[:5]
+// fingerprintSalt is the salt used by Claude Code to compute the 3-char build fingerprint.
+const fingerprintSalt = "59cf53e54c78"
 
-	// Build hash: 3-char hex, matches the pattern seen in real requests (e.g. "a43")
-	buildBytes := make([]byte, 2)
-	_, _ = rand.Read(buildBytes)
-	buildHash := hex.EncodeToString(buildBytes)[:3]
-
-	return fmt.Sprintf("x-anthropic-billing-header: cc_version=2.1.63.%s; cc_entrypoint=cli; cch=%s;", buildHash, cch)
+// computeFingerprint computes the 3-char build fingerprint that Claude Code embeds in cc_version.
+// Algorithm: SHA256(salt + messageText[4] + messageText[7] + messageText[20] + version)[:3]
+func computeFingerprint(messageText, version string) string {
+	indices := [3]int{4, 7, 20}
+	runes := []rune(messageText)
+	var sb strings.Builder
+	for _, idx := range indices {
+		if idx < len(runes) {
+			sb.WriteRune(runes[idx])
+		} else {
+			sb.WriteRune('0')
+		}
+	}
+	input := fingerprintSalt + sb.String() + version
+	h := sha256.Sum256([]byte(input))
+	return hex.EncodeToString(h[:])[:3]
 }
 
-// checkSystemInstructionsWithMode injects Claude Code-style system blocks:
+// generateBillingHeader creates the x-anthropic-billing-header text block that
+// real Claude Code prepends to every system prompt array.
+// Format: x-anthropic-billing-header: cc_version=<ver>.<build>; cc_entrypoint=<ep>; cch=<hash>; [cc_workload=<wl>;]
+func generateBillingHeader(payload []byte, experimentalCCHSigning bool, version, messageText, entrypoint, workload string) string {
+	if entrypoint == "" {
+		entrypoint = "cli"
+	}
+	buildHash := computeFingerprint(messageText, version)
+	workloadPart := ""
+	if workload != "" {
+		workloadPart = fmt.Sprintf(" cc_workload=%s;", workload)
+	}
+
+	if experimentalCCHSigning {
+		return fmt.Sprintf("x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s; cch=00000;%s", version, buildHash, entrypoint, workloadPart)
+	}
+
+	// Generate a deterministic cch hash from the payload content (system + messages + tools).
+	h := sha256.Sum256(payload)
+	cch := hex.EncodeToString(h[:])[:5]
+	return fmt.Sprintf("x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=%s; cch=%s;%s", version, buildHash, entrypoint, cch, workloadPart)
+}
+
+func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, "2.1.63", "", "")
+}
+
+// checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks:
 //
 //	system[0]: billing header (no cache_control)
 //	system[1]: agent identifier (no cache_control)
 //	system[2..]: user system messages (cache_control added when missing)
-func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
+func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, experimentalCCHSigning bool, version, entrypoint, workload string) []byte {
 	system := gjson.GetBytes(payload, "system")
 
-	billingText := generateBillingHeader(payload)
+	// Extract original message text for fingerprint computation (before billing injection).
+	// Use the first system text block's content as the fingerprint source.
+	messageText := ""
+	if system.IsArray() {
+		system.ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() == "text" {
+				messageText = part.Get("text").String()
+				return false
+			}
+			return true
+		})
+	} else if system.Type == gjson.String {
+		messageText = system.String()
+	}
+
+	billingText := generateBillingHeader(payload, experimentalCCHSigning, version, messageText, entrypoint, workload)
 	billingBlock := fmt.Sprintf(`{"type":"text","text":"%s"}`, billingText)
 	// No cache_control on the agent block. It is a cloaking artifact with zero cache
 	// value (the last system block is what actually triggers caching of all system content).
@@ -1291,51 +1356,44 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 // Cloaking includes: system prompt injection, fake user ID, and sensitive word obfuscation.
 func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, payload []byte, model string, apiKey string) []byte {
 	clientUserAgent := getClientUserAgent(ctx)
+	useExperimentalCCHSigning := experimentalCCHSigningEnabled(cfg, auth)
 
 	// Get cloak config from ClaudeKey configuration
 	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
+	attrMode, attrStrict, attrWords, attrCache := getCloakConfigFromAuth(auth)
 
 	// Determine cloak settings
-	var cloakMode string
-	var strictMode bool
-	var sensitiveWords []string
-	var cacheUserID bool
+	cloakMode := attrMode
+	strictMode := attrStrict
+	sensitiveWords := attrWords
+	cacheUserID := attrCache
 
 	if cloakCfg != nil {
-		cloakMode = cloakCfg.Mode
-		strictMode = cloakCfg.StrictMode
-		sensitiveWords = cloakCfg.SensitiveWords
+		if mode := strings.TrimSpace(cloakCfg.Mode); mode != "" {
+			cloakMode = mode
+		}
+		if cloakCfg.StrictMode {
+			strictMode = true
+		}
+		if len(cloakCfg.SensitiveWords) > 0 {
+			sensitiveWords = cloakCfg.SensitiveWords
+		}
 		if cloakCfg.CacheUserID != nil {
 			cacheUserID = *cloakCfg.CacheUserID
 		}
 	}
 
-	// Fallback to auth attributes if no config found
-	if cloakMode == "" {
-		attrMode, attrStrict, attrWords, attrCache := getCloakConfigFromAuth(auth)
-		cloakMode = attrMode
-		if !strictMode {
-			strictMode = attrStrict
-		}
-		if len(sensitiveWords) == 0 {
-			sensitiveWords = attrWords
-		}
-		if cloakCfg == nil || cloakCfg.CacheUserID == nil {
-			cacheUserID = attrCache
-		}
-	} else if cloakCfg == nil || cloakCfg.CacheUserID == nil {
-		_, _, _, attrCache := getCloakConfigFromAuth(auth)
-		cacheUserID = attrCache
-	}
-
 	// Determine if cloaking should be applied
-	if !shouldCloak(cloakMode, clientUserAgent) {
+	if !helps.ShouldCloak(cloakMode, clientUserAgent) {
 		return payload
 	}
 
 	// Skip system instructions for claude-3-5-haiku models
 	if !strings.HasPrefix(model, "claude-3-5-haiku") {
-		payload = checkSystemInstructionsWithMode(payload, strictMode)
+		billingVersion := helps.DefaultClaudeVersion(cfg)
+		entrypoint := parseEntrypointFromUA(clientUserAgent)
+		workload := getWorkloadFromContext(ctx)
+		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useExperimentalCCHSigning, billingVersion, entrypoint, workload)
 	}
 
 	// Inject fake user ID
@@ -1343,8 +1401,8 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 
 	// Apply sensitive word obfuscation
 	if len(sensitiveWords) > 0 {
-		matcher := buildSensitiveWordMatcher(sensitiveWords)
-		payload = obfuscateSensitiveWords(payload, matcher)
+		matcher := helps.BuildSensitiveWordMatcher(sensitiveWords)
+		payload = helps.ObfuscateSensitiveWords(payload, matcher)
 	}
 
 	return payload
@@ -1354,7 +1412,7 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 // According to Anthropic's documentation, cache prefixes are created in order: tools -> system -> messages.
 // This function adds cache_control to:
 // 1. The LAST tool in the tools array (caches all tool definitions)
-// 2. The LAST element in the system array (caches system prompt)
+// 2. The LAST system prompt element
 // 3. The SECOND-TO-LAST user turn (caches conversation history for multi-turn)
 //
 // Up to 4 cache breakpoints are allowed per request. Tools, System, and Messages are INDEPENDENT breakpoints.
@@ -1923,4 +1981,27 @@ func injectSystemCacheControl(payload []byte) []byte {
 	}
 
 	return payload
+}
+
+func ensureModelMaxTokens(body []byte, modelID string) []byte {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body
+	}
+
+	if maxTokens := gjson.GetBytes(body, "max_tokens"); maxTokens.Exists() {
+		return body
+	}
+
+	for _, provider := range registry.GetGlobalRegistry().GetModelProviders(strings.TrimSpace(modelID)) {
+		if strings.EqualFold(provider, "claude") {
+			maxTokens := defaultModelMaxTokens
+			if info := registry.GetGlobalRegistry().GetModelInfo(strings.TrimSpace(modelID), "claude"); info != nil && info.MaxCompletionTokens > 0 {
+				maxTokens = info.MaxCompletionTokens
+			}
+			body, _ = sjson.SetBytes(body, "max_tokens", maxTokens)
+			return body
+		}
+	}
+
+	return body
 }

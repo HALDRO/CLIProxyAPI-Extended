@@ -1,6 +1,7 @@
 # Binaries
 cli-proxy-api
 cliproxy
+/server
 *.exe
 
 
@@ -39,6 +40,7 @@ log_analyzer.go
 .scripts/*
 .vscode/*
 .cursor/*
+.worktrees/
 .codex/*
 .claude/*
 .gemini/*
@@ -60,4 +62,10 @@ _wgun/
 # macOS
 .DS_Store
 ._*
+
+# Opencode
+.beads/
+.opencode/
+.cli-proxy-api/
+.venv/
 *.bak
