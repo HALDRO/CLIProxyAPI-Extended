@@ -37,6 +37,12 @@ func (a *Adapter) TranslateRequest(ctx context.Context, from, to sdktranslator.F
 	case "codex":
 		// Codex uses a stricter Responses API upstream.
 		return executor.TranslateToCodex(cfg, from, model, payload, stream, nil)
+	case "codebuddy":
+		// CodeBuddy (Tencent) uses OpenAI-compatible Chat Completions format.
+		return executor.TranslateToOpenAI(cfg, from, model, payload, stream, nil, executor.FormatChatCompletions)
+	case "cursor":
+		// Cursor uses OpenAI-compatible Chat Completions format on the request boundary.
+		return executor.TranslateToOpenAI(cfg, from, model, payload, stream, nil, executor.FormatChatCompletions)
 	default:
 		return nil, fmt.Errorf("canonical translator: unsupported request target format %q", to.String())
 	}
@@ -68,7 +74,7 @@ func (a *Adapter) TranslateStream(ctx context.Context, from, to sdktranslator.Fo
 			state = &executor.GeminiCLIStreamState{ClaudeState: from_ir.NewClaudeStreamState()}
 		case "claude":
 			state = from_ir.NewClaudeStreamState()
-		case "openai", "openai-response", "codex", "ollama":
+		case "openai", "openai-response", "codex", "ollama", "codebuddy", "cursor":
 			state = &executor.OpenAIStreamState{}
 		default:
 			return nil, fmt.Errorf("canonical translator: unsupported stream provider %q", provider)

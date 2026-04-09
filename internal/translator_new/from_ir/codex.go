@@ -45,7 +45,10 @@ func ToCodexRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 	}
 
 	if len(req.Tools) > 0 {
-		m["tools"] = buildResponsesTools(req.Tools)
+		tools := buildResponsesTools(req.Tools)
+		// Normalize builtin tool types: web_search_preview* → web_search
+		tools = normalizeCodexBuiltinTools(tools)
+		m["tools"] = tools
 	}
 	if req.ToolChoice != "" {
 		m["tool_choice"] = req.ToolChoice
@@ -86,4 +89,31 @@ func ToCodexRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 	// (Codex upstream rejects them.)
 
 	return json.Marshal(m)
+}
+
+// normalizeCodexBuiltinTools rewrites legacy/preview built-in tool variants to the
+// stable names expected by the current Codex upstream.
+func normalizeCodexBuiltinTools(tools []interface{}) []interface{} {
+	for i, t := range tools {
+		toolMap, ok := t.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if typStr, ok := toolMap["type"].(string); ok {
+			if normalized := normalizeCodexBuiltinToolType(typStr); normalized != "" {
+				toolMap["type"] = normalized
+				tools[i] = toolMap
+			}
+		}
+	}
+	return tools
+}
+
+func normalizeCodexBuiltinToolType(toolType string) string {
+	switch toolType {
+	case "web_search_preview", "web_search_preview_2025_03_11":
+		return "web_search"
+	default:
+		return ""
+	}
 }

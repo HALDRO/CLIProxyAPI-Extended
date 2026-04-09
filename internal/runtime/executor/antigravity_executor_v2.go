@@ -23,6 +23,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/from_ir"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
@@ -220,7 +221,7 @@ func (e *AntigravityExecutorV2) Execute(ctx context.Context, auth *cliproxyauth.
 		if auth.Metadata["project_id"] == nil {
 			// Populate project_id via loadCodeAssist.
 			if errProject := ensureAntigravityProjectID(ctx, e.cfg, auth, token); errProject != nil {
-				logWithRequestID(ctx).Warnf("antigravity canonical executor: ensure project id failed: %v", errProject)
+				helps.LogWithRequestID(ctx).Warnf("antigravity canonical executor: ensure project id failed: %v", errProject)
 			}
 		}
 	}
@@ -300,7 +301,7 @@ attemptLoop:
 
 			data, errRead := io.ReadAll(httpResp.Body)
 			if errClose := httpResp.Body.Close(); errClose != nil {
-				logWithRequestID(ctx).Errorf("antigravity canonical executor: close response body error: %v", errClose)
+				helps.LogWithRequestID(ctx).Errorf("antigravity canonical executor: close response body error: %v", errClose)
 			}
 			recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 			appendAPIResponseChunk(ctx, e.cfg, data)
@@ -322,7 +323,7 @@ attemptLoop:
 				}
 				if antigravityShouldRetryNoCapacity(httpResp.StatusCode, data) {
 					if idx+1 < len(baseURLs) {
-						logWithRequestID(ctx).Debugf("antigravity v2 executor: no capacity on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+						helps.LogWithRequestID(ctx).Debugf("antigravity v2 executor: no capacity on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 						continue
 					}
 					if attempt+1 < attempts {
@@ -337,8 +338,8 @@ attemptLoop:
 				break
 			}
 
-			reporter.publish(ctx, parseAntigravityUsage(data))
-			translated, err := TranslateAntigravityResponseNonStream(e.cfg, opts.SourceFormat, data, req.Model)
+			reporter.publish(ctx, helps.ParseAntigravityUsage(data))
+			translated, err := TranslateAntigravityResponseNonStream(e.cfg, opts.SourceFormat, data, req.Model, nil)
 			if err != nil {
 				return resp, fmt.Errorf("translate response: %w", err)
 			}
@@ -399,7 +400,7 @@ func (e *AntigravityExecutorV2) ExecuteStream(ctx context.Context, auth *cliprox
 		if auth.Metadata["project_id"] == nil {
 			// Populate project_id via loadCodeAssist.
 			if errProject := ensureAntigravityProjectID(ctx, e.cfg, auth, token); errProject != nil {
-				logWithRequestID(ctx).Warnf("antigravity canonical executor: ensure project id failed: %v", errProject)
+				helps.LogWithRequestID(ctx).Warnf("antigravity canonical executor: ensure project id failed: %v", errProject)
 			}
 		}
 	}
@@ -484,7 +485,7 @@ attemptLoop:
 				}
 				if antigravityShouldRetryNoCapacity(httpResp.StatusCode, data) {
 					if idx+1 < len(baseURLs) {
-						logWithRequestID(ctx).Debugf("antigravity v2 executor: no capacity on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
+						helps.LogWithRequestID(ctx).Debugf("antigravity v2 executor: no capacity on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 						continue
 					}
 					if attempt+1 < attempts {
@@ -538,14 +539,14 @@ attemptLoop:
 					cacheThoughtSignatureFromAntigravityChunk(sessionID, line)
 
 					// Filter usage metadata on non-terminal chunks.
-					line = FilterSSEUsageMetadata(line)
+					line = helps.FilterSSEUsageMetadata(line)
 
-					payload := jsonPayload(line)
+					payload := helps.JSONPayload(line)
 					if payload == nil {
 						continue
 					}
 
-					if detail, ok := parseAntigravityStreamUsage(payload); ok {
+					if detail, ok := helps.ParseAntigravityStreamUsage(payload); ok {
 						reporter.publish(ctx, detail)
 					}
 
@@ -800,7 +801,7 @@ func cacheThoughtSignatureFromAntigravityChunk(sessionID string, line []byte) {
 	if strings.TrimSpace(sessionID) == "" {
 		return
 	}
-	payload := jsonPayload(line)
+	payload := helps.JSONPayload(line)
 	if payload == nil || !gjson.ValidBytes(payload) {
 		return
 	}

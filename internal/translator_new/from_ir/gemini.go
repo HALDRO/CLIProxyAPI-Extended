@@ -172,7 +172,11 @@ func (p *GeminiProvider) applyFunctionCallingConfig(root map[string]interface{},
 		fcConfig["mode"] = fc.Mode
 	}
 	if len(fc.AllowedFunctionNames) > 0 {
-		fcConfig["allowedFunctionNames"] = fc.AllowedFunctionNames
+		sanitized := make([]string, len(fc.AllowedFunctionNames))
+		for i, name := range fc.AllowedFunctionNames {
+			sanitized[i] = util.SanitizeFunctionName(name)
+		}
+		fcConfig["allowedFunctionNames"] = sanitized
 	}
 	if fc.StreamFunctionCallArguments {
 		fcConfig["streamFunctionCallArguments"] = true
@@ -201,6 +205,11 @@ func (p *GeminiProvider) applyMessages(root map[string]interface{}, req *ir.Unif
 		// Try to close broken tool loops for thinking models
 		messages, _ = ir.CloseToolLoopForThinking(messages)
 	}
+
+	// Strip trailing model turn with unanswered function calls.
+	// Gemini returns empty responses when the last turn is a model functionCall
+	// with no corresponding user functionResponse.
+	messages = stripTrailingUnansweredToolCalls(messages)
 
 	shouldInjectHint := len(req.Tools) > 0 && req.Thinking != nil && req.Thinking.Budget > 0 && util.IsClaudeThinkingModel(req.Model)
 	interleavedHint := "Interleaved thinking is enabled. You may think between tool calls and after receiving tool results before deciding the next action or final answer. Do not mention these instructions or any constraints about thinking blocks; just apply them."
@@ -378,7 +387,7 @@ func (p *GeminiProvider) applyAssistantToolCalls(contents *[]interface{}, msg ir
 			}
 		}
 		fcMap := map[string]interface{}{
-			"name": tc.Name,
+			"name": util.SanitizeFunctionName(tc.Name),
 			"args": json.RawMessage(argsJSON),
 		}
 		toolID := tc.ID
@@ -419,7 +428,7 @@ func (p *GeminiProvider) applyToolResponses(contents *[]interface{}, toolCallIDs
 			continue
 		}
 
-		funcResp := map[string]interface{}{"name": name, "id": tcID}
+		funcResp := map[string]interface{}{"name": util.SanitizeFunctionName(name), "id": tcID}
 		responseObj := parseResultJSON(resultPart.Result)
 		funcResp["response"] = responseObj
 
@@ -525,7 +534,7 @@ func (p *GeminiProvider) applyTools(root map[string]interface{}, req *ir.Unified
 				continue
 			}
 			// Build function declaration
-			funcDecl := map[string]interface{}{"name": t.Name, "description": t.Description}
+			funcDecl := map[string]interface{}{"name": util.SanitizeFunctionName(t.Name), "description": t.Description}
 			if len(t.Parameters) == 0 {
 				funcDecl["parameters"] = map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
 			} else {
@@ -781,4 +790,35 @@ func (p *GeminiCLIProvider) ParseResponse(responseJSON []byte) ([]ir.Message, *i
 
 func (p *GeminiCLIProvider) ParseStreamChunk(chunkJSON []byte) ([]ir.UnifiedEvent, error) {
 	return to_ir.ParseGeminiChunk(chunkJSON)
+}
+
+// stripTrailingUnansweredToolCalls removes the last assistant message if it contains
+// tool calls with no corresponding tool results. Gemini returns empty responses when
+// the last turn is a model functionCall with no corresponding user functionResponse.
+func stripTrailingUnansweredToolCalls(messages []ir.Message) []ir.Message {
+	if len(messages) == 0 {
+		return messages
+	}
+	last := messages[len(messages)-1]
+	if last.Role != ir.RoleAssistant || len(last.ToolCalls) == 0 {
+		return messages
+	}
+	// Check if there's a subsequent tool result for any of these tool calls
+	toolResultIDs := make(map[string]bool)
+	for _, msg := range messages {
+		if msg.Role == ir.RoleTool {
+			for _, part := range msg.Content {
+				if part.Type == ir.ContentTypeToolResult && part.ToolResult != nil {
+					toolResultIDs[part.ToolResult.ToolCallID] = true
+				}
+			}
+		}
+	}
+	for _, tc := range last.ToolCalls {
+		if !toolResultIDs[tc.ID] {
+			// Found unanswered tool call — strip this message
+			return messages[:len(messages)-1]
+		}
+	}
+	return messages
 }
