@@ -716,7 +716,11 @@ func processMessagesStruct(messages []ir.Message, tools []ToolSpecification, mod
 		case ir.RoleUser:
 			userMsg := buildUserMessageStruct(msg, tools, modelID, origin, isLast)
 			if len(pendingToolResults) > 0 {
-				mergePendingToolResultsIntoUser(userMsg, pendingToolResults)
+				if userMessageCanAbsorbPendingToolResults(msg) {
+					mergePendingToolResultsIntoUser(userMsg, pendingToolResults)
+				} else {
+					history = append(history, HistoryMessage{UserInputMessage: syntheticToolResultHistoryMessage(pendingToolResults, modelID, origin)})
+				}
 				pendingToolResults = nil
 			}
 			if isLast {
@@ -818,6 +822,21 @@ func mergePendingToolResultsIntoUser(userMsg *UserInputMessage, pending []ToolRe
 	if strings.TrimSpace(userMsg.Content) == "" {
 		userMsg.Content = kiroUserPlaceholderToolResults
 	}
+}
+
+func userMessageCanAbsorbPendingToolResults(msg ir.Message) bool {
+	for _, part := range msg.Content {
+		switch part.Type {
+		case ir.ContentTypeToolResult:
+			continue
+		case ir.ContentTypeText:
+			if strings.TrimSpace(part.Text) == "" {
+				continue
+			}
+		}
+		return false
+	}
+	return true
 }
 
 func syntheticToolResultHistoryMessage(toolResults []ToolResult, modelID, origin string) *UserInputMessage {
