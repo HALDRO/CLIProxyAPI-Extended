@@ -900,7 +900,9 @@ func parseOpenAIContentPart(item gjson.Result, msg *ir.Message) *ir.ContentPart 
 			ID: item.Get("id").String(), Name: item.Get("name").String(), Args: argsRaw,
 		})
 	case "tool_result":
-		msg.Role = ir.RoleTool
+		// Keep the original message role. A user content array may legitimately mix
+		// tool_result blocks with follow-up text, and rewriting the whole message to
+		// RoleTool drops the user continuation needed for the next turn.
 		// Decode thoughtSignature from tool_use_id if encoded
 		toolUseID, signature := ir.DecodeToolIDAndSignature(item.Get("tool_use_id").String())
 		return &ir.ContentPart{

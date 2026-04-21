@@ -906,6 +906,12 @@ func handleReasoningEvent(event ir.UnifiedEvent, state *ResponsesStreamState, ne
 			"item": map[string]interface{}{"id": state.ReasoningID, "type": "reasoning", "status": "in_progress", "summary": []interface{}{}},
 		})
 		out = append(out, fmt.Sprintf("event: response.output_item.added\ndata: %s\n\n", string(b)))
+
+		partAdded, _ := json.Marshal(map[string]interface{}{
+			"type": "response.reasoning_summary_part.added", "sequence_number": nextSeq(), "item_id": state.ReasoningID,
+			"output_index": 0, "summary_index": 0, "part": map[string]interface{}{"type": "summary_text", "text": ""},
+		})
+		out = append(out, fmt.Sprintf("event: response.reasoning_summary_part.added\ndata: %s\n\n", string(partAdded)))
 	}
 	state.ReasoningBuffer += text
 	b, _ := json.Marshal(map[string]interface{}{
@@ -1128,6 +1134,18 @@ func handleFinishEvent(event ir.UnifiedEvent, state *ResponsesStreamState, nextS
 		out = append(out, fmt.Sprintf("event: response.output_item.done\ndata: %s\n\n", string(b2)))
 	}
 	if state.ReasoningID != "" {
+		textDone, _ := json.Marshal(map[string]interface{}{
+			"type": "response.reasoning_summary_text.done", "sequence_number": nextSeq(), "item_id": state.ReasoningID,
+			"output_index": 0, "summary_index": 0, "text": state.ReasoningBuffer,
+		})
+		out = append(out, fmt.Sprintf("event: response.reasoning_summary_text.done\ndata: %s\n\n", string(textDone)))
+
+		partDone, _ := json.Marshal(map[string]interface{}{
+			"type": "response.reasoning_summary_part.done", "sequence_number": nextSeq(), "item_id": state.ReasoningID,
+			"output_index": 0, "summary_index": 0, "part": map[string]interface{}{"type": "summary_text", "text": state.ReasoningBuffer},
+		})
+		out = append(out, fmt.Sprintf("event: response.reasoning_summary_part.done\ndata: %s\n\n", string(partDone)))
+
 		b, _ := json.Marshal(map[string]interface{}{
 			"type": "response.output_item.done", "sequence_number": nextSeq(), "output_index": 0,
 			"item": map[string]interface{}{

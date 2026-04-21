@@ -6,6 +6,7 @@
 package from_ir
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"strconv"
 	"strings"
@@ -137,13 +138,12 @@ const (
 
 	// kiroUserPlaceholderEmpty is used when a synthetic user message is needed
 	// (e.g., last message was assistant, Kiro expects user as CurrentMessage).
-	// Using "." avoids the model interpreting it as an instruction to keep working
-	// (which "Continue" caused) while remaining non-empty for the API.
-	kiroUserPlaceholderEmpty = "."
+	// Match working Kiro clients, which use "Continue" to resume the current turn.
+	kiroUserPlaceholderEmpty = "Continue"
 
 	// kiroAssistantPlaceholder is used when inserting synthetic assistant messages
-	// for role alternation. Matches kiro.rs build_history behavior.
-	kiroAssistantPlaceholder = "OK"
+	// so history ends with assistantResponseMessage before a current user turn.
+	kiroAssistantPlaceholder = "Continue"
 
 	// Chunked write/edit tool description suffixes (from kiro.rs converter.rs).
 	// Appended to Write/Edit tool descriptions to prevent output truncation on large files.
@@ -264,8 +264,25 @@ func extractConversationID(req *ir.UnifiedChatRequest) string {
 		if id, ok := req.Metadata["conversationId"].(string); ok && strings.TrimSpace(id) != "" {
 			return strings.TrimSpace(id)
 		}
+		if sid, ok := req.Metadata["session_id"].(string); ok && strings.TrimSpace(sid) != "" {
+			return deriveStableKiroConversationID(strings.TrimSpace(sid))
+		}
 	}
 	return uuid.New().String()
+}
+
+func deriveStableKiroConversationID(sessionID string) string {
+	hash := sha256.Sum256([]byte("kiro-conv:" + sessionID))
+	hex := strconv.FormatUint(uint64(hash[0])<<56|uint64(hash[1])<<48|uint64(hash[2])<<40|uint64(hash[3])<<32|uint64(hash[4])<<24|uint64(hash[5])<<16|uint64(hash[6])<<8|uint64(hash[7]), 16)
+	for len(hex) < 16 {
+		hex = "0" + hex
+	}
+	hex2 := strconv.FormatUint(uint64(hash[8])<<56|uint64(hash[9])<<48|uint64(hash[10])<<40|uint64(hash[11])<<32|uint64(hash[12])<<24|uint64(hash[13])<<16|uint64(hash[14])<<8|uint64(hash[15]), 16)
+	for len(hex2) < 16 {
+		hex2 = "0" + hex2
+	}
+	combined := hex + hex2
+	return combined[0:8] + "-" + combined[8:12] + "-" + combined[12:16] + "-" + combined[16:20] + "-" + combined[20:32]
 }
 
 func extractContinuationID(req *ir.UnifiedChatRequest) string {
@@ -447,7 +464,8 @@ func sanitizeCurrentToolResults(currentMsg *CurrentMessage, history []HistoryMes
 	}
 
 	validToolUseIDs := collectHistoryToolUseIDs(history)
-	filtered := filterToolResultsByKnownToolUseIDs(ctx.ToolResults, validToolUseIDs)
+	historyToolResultIDs := collectHistoryToolResultIDs(history)
+	filtered := filterCurrentToolResults(ctx.ToolResults, validToolUseIDs, historyToolResultIDs)
 	if len(filtered) == 0 {
 		ctx.ToolResults = nil
 		if len(ctx.Tools) == 0 {
@@ -466,6 +484,22 @@ func collectHistoryToolUseIDs(history []HistoryMessage) map[string]struct{} {
 		}
 		for _, tu := range msg.AssistantResponseMessage.ToolUses {
 			id := strings.TrimSpace(tu.ToolUseId)
+			if id != "" {
+				ids[id] = struct{}{}
+			}
+		}
+	}
+	return ids
+}
+
+func collectHistoryToolResultIDs(history []HistoryMessage) map[string]struct{} {
+	ids := make(map[string]struct{})
+	for _, msg := range history {
+		if msg.UserInputMessage == nil || msg.UserInputMessage.UserInputMessageContext == nil {
+			continue
+		}
+		for _, tr := range msg.UserInputMessage.UserInputMessageContext.ToolResults {
+			id := strings.TrimSpace(tr.ToolUseId)
 			if id != "" {
 				ids[id] = struct{}{}
 			}
@@ -493,6 +527,38 @@ func filterToolResultsByKnownToolUseIDs(toolResults []ToolResult, validToolUseID
 			continue
 		}
 		seen[id] = struct{}{}
+		filtered = append(filtered, tr)
+	}
+	return filtered
+}
+
+func filterCurrentToolResults(toolResults []ToolResult, validToolUseIDs, historyToolResultIDs map[string]struct{}) []ToolResult {
+	if len(toolResults) == 0 {
+		return toolResults
+	}
+
+	unpairedToolUseIDs := make(map[string]struct{}, len(validToolUseIDs))
+	for id := range validToolUseIDs {
+		if _, paired := historyToolResultIDs[id]; !paired {
+			unpairedToolUseIDs[id] = struct{}{}
+		}
+	}
+
+	filtered := make([]ToolResult, 0, len(toolResults))
+	seenCurrent := make(map[string]struct{}, len(toolResults))
+	for _, tr := range toolResults {
+		id := strings.TrimSpace(tr.ToolUseId)
+		if id == "" {
+			continue
+		}
+		if _, dup := seenCurrent[id]; dup {
+			continue
+		}
+		if _, ok := unpairedToolUseIDs[id]; !ok {
+			continue
+		}
+		seenCurrent[id] = struct{}{}
+		delete(unpairedToolUseIDs, id)
 		filtered = append(filtered, tr)
 	}
 	return filtered
@@ -680,7 +746,15 @@ func processMessagesStruct(messages []ir.Message, tools []ToolSpecification, mod
 		case ir.RoleTool:
 			pendingToolResults = append(pendingToolResults, collectToolResults(msg)...)
 			if isLast {
-				currentMsg = buildMergedToolResultMessageStruct(nonSystem[i:], tools, modelID, origin)
+				currentMsg = UserInputMessage{
+					Content: kiroUserPlaceholderToolResults,
+					ModelId: modelID,
+					Origin:  origin,
+					UserInputMessageContext: &UserInputMessageContext{
+						ToolResults: append([]ToolResult(nil), pendingToolResults...),
+						Tools:       tools,
+					},
+				}
 				hasCurrent = true
 			}
 		}
@@ -705,8 +779,22 @@ func processMessagesStruct(messages []ir.Message, tools []ToolSpecification, mod
 
 	history = truncateHistoryIfNeeded(history)
 	wrappedCurrent := CurrentMessage{UserInputMessage: currentMsg}
+	ensureHistoryEndsWithAssistant(&history)
 	sanitizeCurrentToolResults(&wrappedCurrent, history)
 	return history, wrappedCurrent
+}
+
+func ensureHistoryEndsWithAssistant(history *[]HistoryMessage) {
+	if history == nil || len(*history) == 0 {
+		return
+	}
+	last := (*history)[len(*history)-1]
+	if last.AssistantResponseMessage != nil {
+		return
+	}
+	*history = append(*history, HistoryMessage{
+		AssistantResponseMessage: &AssistantResponseMessage{Content: kiroAssistantPlaceholder},
+	})
 }
 
 func collectToolResults(msg ir.Message) []ToolResult {
@@ -958,16 +1046,9 @@ func injectSystemPromptStruct(prompt string, history *[]HistoryMessage, currentM
 }
 
 // Helpers from original code
-// removePrefill removes trailing assistant messages that are prefills (no tool_calls).
+// Kiro expects the trailing assistant turn to remain in history so a synthetic
+// current user message can continue the conversation. Do not trim it here.
 func removePrefill(messages []ir.Message) []ir.Message {
-	if len(messages) == 0 {
-		return messages
-	}
-	lastIdx := len(messages) - 1
-	lastMsg := messages[lastIdx]
-	if lastMsg.Role == ir.RoleAssistant && len(lastMsg.ToolCalls) == 0 {
-		return messages[:lastIdx]
-	}
 	return messages
 }
 
@@ -989,7 +1070,10 @@ func mergeConsecutiveMessages(messages []ir.Message) []ir.Message {
 	for _, msg := range messages {
 		if len(merged) > 0 {
 			last := &merged[len(merged)-1]
-			if last.Role == msg.Role && msg.Role != ir.RoleUser {
+			// Keep tool messages isolated. Legacy Kiro translators do not merge them
+			// because each tool turn carries distinct tool_call/tool_result pairing
+			// semantics, and collapsing them can distort multi-step agent flows.
+			if last.Role == msg.Role && msg.Role != ir.RoleUser && msg.Role != ir.RoleTool {
 				last.Content = append(last.Content, msg.Content...)
 				// Preserve tool_calls when merging adjacent assistant messages.
 				// Without this, tool_calls from the second message are lost,

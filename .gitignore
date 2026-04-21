@@ -70,3 +70,4 @@ _wgun/
 .cli-proxy-api/
 .venv/
 *.bak
+internal/translator_new/wdev_test/
