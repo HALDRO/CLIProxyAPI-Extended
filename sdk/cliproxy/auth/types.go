@@ -405,17 +405,6 @@ func (a *Auth) AccountInfo() (string, string) {
 			}
 		}
 	}
-	// For GitHub provider (including github-copilot), return username
-	if strings.HasPrefix(strings.ToLower(a.Provider), "github") {
-		if a.Metadata != nil {
-			if username, ok := a.Metadata["username"].(string); ok {
-				username = strings.TrimSpace(username)
-				if username != "" {
-					return "oauth", username
-				}
-			}
-		}
-	}
 	// Check metadata for email first (OAuth-style auth)
 	if a.Metadata != nil {
 		if method, ok := a.Metadata["auth_method"].(string); ok {
@@ -437,6 +426,14 @@ func (a *Auth) AccountInfo() (string, string) {
 					}
 				}
 				return "personal_access_token", ""
+			}
+		}
+		// For GitHub provider (including github-copilot), return username when email isn't available.
+		if strings.HasPrefix(strings.ToLower(a.Provider), "github") {
+			if username, ok := a.Metadata["username"].(string); ok {
+				if trimmed := strings.TrimSpace(username); trimmed != "" {
+					return "oauth", trimmed
+				}
 			}
 		}
 		if v, ok := a.Metadata["email"].(string); ok {

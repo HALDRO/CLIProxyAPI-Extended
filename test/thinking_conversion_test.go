@@ -2,7 +2,6 @@ package test
 
 import (
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -3069,6 +3068,69 @@ func getTestModels() []*registry.ModelInfo {
 			UserDefined: true,
 			Thinking:    nil,
 		},
+		{
+			ID:          "glm-test",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "test",
+			Type:        "iflow",
+			DisplayName: "GLM Test Model",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"none", "auto", "minimal", "low", "medium", "high", "xhigh"}},
+		},
+		{
+			ID:          "minimax-test",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "test",
+			Type:        "iflow",
+			DisplayName: "MiniMax Test Model",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"none", "auto", "minimal", "low", "medium", "high", "xhigh"}},
+		},
+		{
+			ID:          "gpt-5",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "github-copilot",
+			Type:        "github-copilot",
+			DisplayName: "GPT-5",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}, ZeroAllowed: false, DynamicAllowed: false},
+		},
+		{
+			ID:          "gpt-5.1",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "github-copilot",
+			Type:        "github-copilot",
+			DisplayName: "GPT-5.1",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"none", "low", "medium", "high"}, ZeroAllowed: true, DynamicAllowed: false},
+		},
+		{
+			ID:          "gpt-5.2",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "github-copilot",
+			Type:        "github-copilot",
+			DisplayName: "GPT-5.2",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}, ZeroAllowed: true, DynamicAllowed: false},
+		},
+		{
+			ID:          "gpt-5-codex",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "github-copilot",
+			Type:        "github-copilot",
+			DisplayName: "GPT-5 Codex",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}, ZeroAllowed: false, DynamicAllowed: false},
+		},
+		{
+			ID:          "gpt-5.2-codex",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "github-copilot",
+			Type:        "github-copilot",
+			DisplayName: "GPT-5.2 Codex",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}, ZeroAllowed: true, DynamicAllowed: false},
+		},
 	}
 }
 
@@ -3083,6 +3145,10 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 
 			translateTo := tc.to
 			applyTo := tc.to
+			if tc.to == "iflow" {
+				translateTo = "openai"
+				applyTo = "iflow"
+			}
 			if tc.to == "github-copilot" {
 				if tc.from == "openai-response" {
 					translateTo = "codex"

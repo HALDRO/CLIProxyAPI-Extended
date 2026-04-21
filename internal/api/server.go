@@ -698,6 +698,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
 		mgmt.GET("/kilo-auth-url", s.mgmt.RequestKiloToken)
 		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
+		mgmt.GET("/iflow-auth-url", s.mgmt.RequestIFlowToken)
+		mgmt.POST("/iflow-auth-url", s.mgmt.RequestIFlowCookieToken)
 		mgmt.GET("/kiro-auth-url", s.mgmt.RequestKiroToken)
 		mgmt.GET("/cursor-auth-url", s.mgmt.RequestCursorToken)
 		mgmt.GET("/github-auth-url", s.mgmt.RequestGitHubToken)
