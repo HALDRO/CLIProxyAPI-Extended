@@ -1650,10 +1650,7 @@ func (s *Service) fetchKiroModels(a *coreauth.Auth) []*ModelInfo {
 	// Convert API models to ModelInfo
 	models := convertKiroAPIModels(apiModels)
 
-	// Generate agentic variants
-	models = generateKiroAgenticVariants(models)
-
-	log.Infof("kiro: successfully fetched %d models from API (including agentic variants)", len(models))
+	log.Infof("kiro: successfully fetched %d models from API", len(models))
 	return models
 }
 
@@ -1706,6 +1703,7 @@ func convertKiroAPIModels(apiModels []*kiroauth.KiroModel) []*ModelInfo {
 
 	now := time.Now().Unix()
 	models := make([]*ModelInfo, 0, len(apiModels))
+	seen := make(map[string]struct{}, len(apiModels))
 
 	for _, m := range apiModels {
 		if m == nil || m.ModelID == "" {
@@ -1714,6 +1712,13 @@ func convertKiroAPIModels(apiModels []*kiroauth.KiroModel) []*ModelInfo {
 
 		// Create model ID with kiro- prefix
 		modelID := "kiro-" + normalizeKiroModelID(m.ModelID)
+		if modelID == "kiro-" {
+			continue
+		}
+		if _, exists := seen[modelID]; exists {
+			continue
+		}
+		seen[modelID] = struct{}{}
 
 		info := &ModelInfo{
 			ID:                  modelID,
@@ -1744,6 +1749,7 @@ func normalizeKiroModelID(modelID string) string {
 	// Remove common prefixes
 	modelID = strings.TrimPrefix(modelID, "anthropic.")
 	modelID = strings.TrimPrefix(modelID, "amazon.")
+	modelID = strings.TrimSuffix(modelID, "-agentic")
 
 	// Replace dots with dashes for consistency
 	modelID = strings.ReplaceAll(modelID, ".", "-")
@@ -1766,58 +1772,4 @@ func formatKiroDisplayName(modelName string, rateMultiplier float64) string {
 	}
 
 	return displayName
-}
-
-// generateKiroAgenticVariants generates agentic variants for Kiro models.
-// Agentic variants have optimized system prompts for coding agents.
-func generateKiroAgenticVariants(models []*ModelInfo) []*ModelInfo {
-	if len(models) == 0 {
-		return models
-	}
-
-	result := make([]*ModelInfo, 0, len(models)*2)
-	result = append(result, models...)
-
-	for _, m := range models {
-		if m == nil {
-			continue
-		}
-
-		// Skip if already an agentic variant
-		if strings.HasSuffix(m.ID, "-agentic") {
-			continue
-		}
-
-		// Skip auto models from agentic variant generation
-		if strings.Contains(m.ID, "-auto") {
-			continue
-		}
-
-		// Create agentic variant
-		agentic := &ModelInfo{
-			ID:                  m.ID + "-agentic",
-			Object:              m.Object,
-			Created:             m.Created,
-			OwnedBy:             m.OwnedBy,
-			Type:                m.Type,
-			DisplayName:         m.DisplayName + " (Agentic)",
-			Description:         m.Description + " - Optimized for coding agents (chunked writes)",
-			ContextLength:       m.ContextLength,
-			MaxCompletionTokens: m.MaxCompletionTokens,
-		}
-
-		// Copy thinking support if present
-		if m.Thinking != nil {
-			agentic.Thinking = &registry.ThinkingSupport{
-				Min:            m.Thinking.Min,
-				Max:            m.Thinking.Max,
-				ZeroAllowed:    m.Thinking.ZeroAllowed,
-				DynamicAllowed: m.Thinking.DynamicAllowed,
-			}
-		}
-
-		result = append(result, agentic)
-	}
-
-	return result
 }

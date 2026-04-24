@@ -517,8 +517,23 @@ func ToOpenAIChunkMeta(event ir.UnifiedEvent, model, messageID string, chunkInde
 		}
 	case ir.EventTypeFinish:
 		choice["finish_reason"] = ir.MapFinishReasonToOpenAI(event.FinishReason)
+		nativeFinishReason := ""
 		if meta != nil && meta.NativeFinishReason != "" {
-			choice["native_finish_reason"] = meta.NativeFinishReason
+			nativeFinishReason = meta.NativeFinishReason
+		} else if event.NativeFinishReason != "" {
+			nativeFinishReason = event.NativeFinishReason
+		}
+		if nativeFinishReason != "" {
+			choice["native_finish_reason"] = nativeFinishReason
+		}
+		if event.FinishObserved {
+			choice["finish_observed"] = true
+		}
+		if event.FinishInferred {
+			choice["finish_inferred"] = true
+		}
+		if event.Interrupted {
+			choice["interrupted"] = true
 		}
 		if event.Logprobs != nil {
 			choice["logprobs"] = event.Logprobs
@@ -545,6 +560,11 @@ func ToOpenAIChunkMeta(event ir.UnifiedEvent, model, messageID string, chunkInde
 
 func buildToolCallDelta(event ir.UnifiedEvent) map[string]interface{} {
 	tcChunk := map[string]interface{}{"index": event.ToolCallIndex}
+	if event.ToolCall != nil && event.ToolCall.IsComplete {
+		funcChunk := map[string]interface{}{"arguments": ""}
+		tcChunk["function"] = funcChunk
+		return map[string]interface{}{"tool_calls": []interface{}{tcChunk}}
+	}
 	if event.ToolCall.ID != "" {
 		tcChunk["id"] = event.ToolCall.ID
 		tcChunk["type"] = "function"

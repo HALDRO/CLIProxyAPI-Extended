@@ -125,18 +125,6 @@ func ParseOpenAIRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 		req.ParallelToolCalls = &b
 	}
 
-	for _, m := range root.Get("messages").Array() {
-		if req.Metadata == nil {
-			req.Metadata = make(map[string]any)
-		}
-		if cid := m.Get("additional_kwargs.conversationId"); cid.Exists() && strings.TrimSpace(cid.String()) != "" {
-			req.Metadata["conversationId"] = strings.TrimSpace(cid.String())
-		}
-		if contID := m.Get("additional_kwargs.continuationId"); contID.Exists() && strings.TrimSpace(contID.String()) != "" {
-			req.Metadata["continuationId"] = strings.TrimSpace(contID.String())
-		}
-	}
-
 	if mods := root.Get("modalities"); mods.Exists() && mods.IsArray() {
 		for _, m := range mods.Array() {
 			req.ResponseModality = append(req.ResponseModality, strings.ToUpper(m.String()))
@@ -770,6 +758,30 @@ func parseResponsesStreamEvent(eventType string, root gjson.Result) ([]ir.Unifie
 func parseOpenAIMessage(m gjson.Result) ir.Message {
 	roleStr := m.Get("role").String()
 	msg := ir.Message{Role: ir.MapStandardRole(roleStr)}
+	if akw := m.Get("additional_kwargs"); akw.Exists() && akw.IsObject() {
+		metadata := make(map[string]any)
+		if cid := strings.TrimSpace(akw.Get("conversationId").String()); cid != "" {
+			metadata["conversationId"] = cid
+		}
+		if contID := strings.TrimSpace(akw.Get("continuationId").String()); contID != "" {
+			metadata["continuationId"] = contID
+		}
+		if nativeFinish := strings.TrimSpace(akw.Get("native_finish_reason").String()); nativeFinish != "" {
+			metadata["native_finish_reason"] = nativeFinish
+		}
+		if akw.Get("finish_observed").Exists() {
+			metadata["finish_observed"] = akw.Get("finish_observed").Bool()
+		}
+		if akw.Get("finish_inferred").Exists() {
+			metadata["finish_inferred"] = akw.Get("finish_inferred").Bool()
+		}
+		if akw.Get("interrupted").Exists() {
+			metadata["interrupted"] = akw.Get("interrupted").Bool()
+		}
+		if len(metadata) > 0 {
+			msg.Metadata = metadata
+		}
+	}
 
 	if roleStr == "assistant" {
 		// Parse reasoning content from all supported formats
@@ -818,7 +830,10 @@ func parseOpenAIMessage(m gjson.Result) ir.Message {
 		// This restores the original ID and extracts the signature for round-trip preservation
 		originalID, signature := ir.DecodeToolIDAndSignature(toolCallID)
 		toolResult := &ir.ToolResultPart{
-			ToolCallID: originalID, Result: ir.SanitizeText(extractContentString(content)), ThoughtSignature: signature,
+			ToolCallID:       originalID,
+			Result:           ir.SanitizeText(extractContentString(content)),
+			IsError:          strings.EqualFold(strings.TrimSpace(m.Get("status").String()), "error"),
+			ThoughtSignature: signature,
 		}
 		// Extract images from array content in tool results
 		if content.IsArray() {
@@ -908,7 +923,10 @@ func parseOpenAIContentPart(item gjson.Result, msg *ir.Message) *ir.ContentPart 
 		return &ir.ContentPart{
 			Type: ir.ContentTypeToolResult,
 			ToolResult: &ir.ToolResultPart{
-				ToolCallID: toolUseID, Result: ir.SanitizeText(extractContentString(item.Get("content"))), ThoughtSignature: signature,
+				ToolCallID:       toolUseID,
+				Result:           ir.SanitizeText(extractContentString(item.Get("content"))),
+				IsError:          strings.EqualFold(strings.TrimSpace(item.Get("is_error").String()), "true") || item.Get("is_error").Bool(),
+				ThoughtSignature: signature,
 			},
 		}
 	}

@@ -67,11 +67,6 @@ const (
 
 	// Kiro-specific headers (match upstream executor behavior)
 	kiroAgentModeHeaderV2 = "vibe"
-
-	// kiroAgenticSystemPrompt is a lightweight chunked-write policy reminder.
-	// The actual line-limit instructions are injected into Write/Edit tool descriptions
-	// (see from_ir/kiro.go extractToolsStruct). This system-level hint reinforces silent compliance.
-	kiroAgenticSystemPrompt = `When the Write or Edit tool has content size limits, always comply silently. Never suggest bypassing these limits via alternative tools. Never ask the user whether to switch approaches. Complete all chunked operations without commentary.`
 )
 
 // kiroModelMapping maps model IDs to Kiro API model IDs.
@@ -400,11 +395,6 @@ func (e *KiroExecutorV2) determineOrigin(model string) string {
 	return "CLI"
 }
 
-// isAgenticModel checks if the model is an agentic variant.
-func (e *KiroExecutorV2) isAgenticModel(model string) bool {
-	return strings.HasSuffix(model, "-agentic")
-}
-
 func (e *KiroExecutorV2) ensureValidToken(ctx context.Context, auth *coreauth.Auth) (string, *coreauth.Auth, error) {
 	if auth == nil {
 		return "", nil, fmt.Errorf("kiro: auth is nil")
@@ -560,7 +550,6 @@ type requestContext struct {
 	irReq        *ir.UnifiedChatRequest
 	kiroBody     []byte
 	origin       string
-	isAgentic    bool
 	sourceFormat string
 
 	apiRegion   string
@@ -574,7 +563,6 @@ func (e *KiroExecutorV2) prepareRequest(ctx context.Context, auth *coreauth.Auth
 		req:          req,
 		requestID:    uuid.New().String()[:8],
 		origin:       e.determineOrigin(req.Model),
-		isAgentic:    e.isAgenticModel(req.Model),
 		sourceFormat: sourceFormat,
 	}
 
@@ -606,11 +594,21 @@ func (e *KiroExecutorV2) prepareRequest(ctx context.Context, auth *coreauth.Auth
 
 	// Default Kiro thinking mode to enabled when client doesn't send any thinking config.
 	// Explicit client settings (including disabled) are preserved as-is.
-	applyDefaultKiroThinking(rc.irReq)
+	from_ir.ApplyDefaultKiroThinking(rc.irReq)
 
 	// Initialize metadata if needed (single check)
 	if rc.irReq.Metadata == nil {
 		rc.irReq.Metadata = make(map[string]any)
+	}
+
+	// Kiro conversation continuity cannot rely on metadata round-trip alone because
+	// OpenCode/OpenAI histories often omit assistant additional_kwargs on later turns.
+	// Fall back to a stable session_id derived from the original OpenAI payload so
+	// from_ir/kiro can derive deterministic conversationId/continuationId.
+	if sid, _ := rc.irReq.Metadata["session_id"].(string); strings.TrimSpace(sid) == "" {
+		if sessionID := from_ir.DeriveSessionID(req.Payload); sessionID != "" {
+			rc.irReq.Metadata["session_id"] = sessionID
+		}
 	}
 
 	// Fetch profileArn if missing (for imported accounts from Kiro IDE)
@@ -629,11 +627,6 @@ func (e *KiroExecutorV2) prepareRequest(ctx context.Context, auth *coreauth.Auth
 	// Preserve origin for quota routing (CLI vs AI_EDITOR) in Kiro request body.
 	rc.irReq.Metadata["origin"] = rc.origin
 
-	// Inject agentic system prompt if needed (chunked write policy)
-	if rc.isAgentic {
-		e.injectAgenticPrompt(rc.irReq)
-	}
-
 	// Determine API region (do NOT use OIDC region for API calls)
 	rc.apiRegion = determineKiroAPIRegion(rc.auth)
 	if rc.apiRegion == "" {
@@ -642,63 +635,6 @@ func (e *KiroExecutorV2) prepareRequest(ctx context.Context, auth *coreauth.Auth
 
 	rc.kiroBody, err = (&from_ir.KiroProvider{}).ConvertRequest(rc.irReq)
 	return rc, err
-}
-
-func applyDefaultKiroThinking(req *ir.UnifiedChatRequest) {
-	if req == nil || req.Thinking != nil {
-		return
-	}
-
-	// Match the original Kiro executor behavior: only enable thinking when the
-	// client explicitly signals it via model naming or prompt tags that canonical
-	// parsing may not already have converted into req.Thinking.
-	modelLower := strings.ToLower(req.Model)
-	if strings.Contains(modelLower, "thinking") || strings.Contains(modelLower, "-reason") {
-		req.Thinking = &ir.ThinkingConfig{
-			IncludeThoughts: true,
-			Budget:          16000,
-		}
-		return
-	}
-
-	for _, msg := range req.Messages {
-		if msg.Role != ir.RoleSystem {
-			continue
-		}
-		text := ir.CombineTextParts(msg)
-		if strings.Contains(text, "<thinking_mode>enabled</thinking_mode>") ||
-			strings.Contains(text, "<thinking_mode>interleaved</thinking_mode>") {
-			req.Thinking = &ir.ThinkingConfig{
-				IncludeThoughts: true,
-				Budget:          16000,
-			}
-			return
-		}
-	}
-}
-
-func (e *KiroExecutorV2) injectAgenticPrompt(req *ir.UnifiedChatRequest) {
-	// Find or create system message
-	for i, msg := range req.Messages {
-		if msg.Role == ir.RoleSystem {
-			// Append to existing system message
-			for j, part := range msg.Content {
-				if part.Type == ir.ContentTypeText {
-					req.Messages[i].Content[j].Text += "\n" + kiroAgenticSystemPrompt
-					return
-				}
-			}
-		}
-	}
-	// No system message found, prepend one
-	systemMsg := ir.Message{
-		Role: ir.RoleSystem,
-		Content: []ir.ContentPart{{
-			Type: ir.ContentTypeText,
-			Text: kiroAgenticSystemPrompt,
-		}},
-	}
-	req.Messages = append([]ir.Message{systemMsg}, req.Messages...)
 }
 
 func (e *KiroExecutorV2) buildHTTPRequest(rc *requestContext) (*http.Request, error) {
@@ -905,9 +841,16 @@ func (e *KiroExecutorV2) handleEventStreamResponse(body io.ReadCloser, model str
 	}
 	for _, ev := range state.FlushPendingContent() {
 		if ev.Type == ir.EventTypeToolCall && ev.ToolCall != nil {
-			state.ToolCalls = append(state.ToolCalls, *ev.ToolCall)
+			if !stateHasToolCall(state, ev.ToolCall.ID) {
+				state.ToolCalls = append(state.ToolCalls, *ev.ToolCall)
+			}
 		}
 	}
+	if finalTool := state.FinalizeCurrentTool(); finalTool != nil && !stateHasToolCall(state, finalTool.ID) {
+		state.ToolCalls = append(state.ToolCalls, *finalTool)
+	}
+	finishReason := state.DetermineFinishReason()
+	logKiroCompletionProvenance("kiro-v2: non-stream completion", state, finishReason)
 	if err := scanner.Err(); err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
@@ -921,11 +864,33 @@ func (e *KiroExecutorV2) handleEventStreamResponse(body io.ReadCloser, model str
 	}
 
 	messageID := "chatcmpl-" + uuid.New().String()
-	converted, err := e.convertToSourceFormat([]ir.Message{*msg}, nil, model, messageID, sourceFormat)
+	converted, err := e.convertToSourceFormat([]ir.Message{*msg}, state.Usage, model, messageID, sourceFormat)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
 	return cliproxyexecutor.Response{Payload: converted}, nil
+}
+
+func stateHasToolCall(state *to_ir.KiroStreamState, id string) bool {
+	for _, tc := range state.ToolCalls {
+		if tc.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldFinalizeKiroStreamAfterError(state *to_ir.KiroStreamState) bool {
+	if state == nil {
+		return false
+	}
+	if state.CurrentTool != nil || state.SawToolLifecycleEvent {
+		return true
+	}
+	if state.HasSubstantiveOutput || state.AccumulatedThinking != "" || state.AccumulatedContent != "" {
+		return true
+	}
+	return state.PendingContent != ""
 }
 
 func (e *KiroExecutorV2) handleJSONResponse(body io.ReadCloser, model string, sourceFormat string) (cliproxyexecutor.Response, error) {
@@ -1164,18 +1129,44 @@ func (e *KiroExecutorV2) processStream(ctx context.Context, resp *http.Response,
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		log.Warnf("kiro-v2: stream scanner terminated with error: %v", err)
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return
-		case out <- cliproxyexecutor.StreamChunk{Err: err}:
 		}
-		return
+		state.MarkTransportError()
+		if shouldFinalizeKiroStreamAfterError(state) {
+			log.Warnf("kiro-v2: stream scanner terminated after partial output, finalizing stream: %v", err)
+		} else {
+			log.Warnf("kiro-v2: stream scanner terminated with error: %v", err)
+			select {
+			case <-ctx.Done():
+				return
+			case out <- cliproxyexecutor.StreamChunk{Err: err}:
+			}
+			return
+		}
 	}
 
 	// Flush buffered partial tag suffixes at stream end.
 	for _, ev := range state.FlushPendingContent() {
 		chunk, err := e.convertStreamChunkToSourceFormat(ev, model, messageID, idx, sourceFormat, claudeState)
+		if err == nil && len(chunk) > 0 {
+			if !emitChunk(chunk) {
+				return
+			}
+			idx++
+		}
+	}
+	finalToolIndex := state.CurrentToolIndex
+	if finalTool := state.FinalizeCurrentTool(); finalTool != nil {
+		if !stateHasToolCall(state, finalTool.ID) {
+			state.ToolCalls = append(state.ToolCalls, *finalTool)
+		}
+		completionEvent := ir.UnifiedEvent{
+			Type:          ir.EventTypeToolCallDelta,
+			ToolCall:      &ir.ToolCall{ID: finalTool.ID, Name: finalTool.Name, IsComplete: true},
+			ToolCallIndex: finalToolIndex,
+		}
+		chunk, err := e.convertStreamChunkToSourceFormat(completionEvent, model, messageID, idx, sourceFormat, claudeState)
 		if err == nil && len(chunk) > 0 {
 			if !emitChunk(chunk) {
 				return
@@ -1197,15 +1188,15 @@ func (e *KiroExecutorV2) processStream(ctx context.Context, resp *http.Response,
 
 	// Build finish event with usage
 	finishReason := state.DetermineFinishReason()
-	// If we only got reasoning and no content, the model likely hit its output
-	// limit during the thinking phase.
-	if state.AccumulatedThinking != "" && !state.HasSubstantiveOutput && len(state.ToolCalls) == 0 {
-		finishReason = ir.FinishReasonLength
-	}
+	logKiroCompletionProvenance("kiro-v2: stream completion", state, finishReason)
 	finish := ir.UnifiedEvent{
-		Type:         ir.EventTypeFinish,
-		FinishReason: finishReason,
-		Usage:        state.Usage,
+		Type:               ir.EventTypeFinish,
+		FinishReason:       finishReason,
+		Usage:              state.Usage,
+		NativeFinishReason: state.ObservedStopSignal,
+		FinishObserved:     state.CompletionObserved,
+		FinishInferred:     state.CompletionInferred,
+		Interrupted:        state.Interrupted,
 	}
 
 	// Fallback: estimate tokens if API didn't return them
@@ -1251,6 +1242,21 @@ func (e *KiroExecutorV2) processStream(ctx context.Context, resp *http.Response,
 	if err == nil && len(chunk) > 0 {
 		_ = emitChunk(chunk)
 	}
+}
+
+func logKiroCompletionProvenance(prefix string, state *to_ir.KiroStreamState, finishReason ir.FinishReason) {
+	if state == nil {
+		return
+	}
+	log.WithFields(log.Fields{
+		"finish_reason":        finishReason,
+		"finish_observed":      state.CompletionObserved,
+		"finish_inferred":      state.CompletionInferred,
+		"interrupted":          state.Interrupted,
+		"observed_stop_signal": state.ObservedStopSignal,
+		"tool_calls":           len(state.ToolCalls),
+		"tool_lifecycle_seen":  state.SawToolLifecycleEvent,
+	}).Info(prefix)
 }
 
 // convertStreamChunkToSourceFormat converts a streaming event to the appropriate format.

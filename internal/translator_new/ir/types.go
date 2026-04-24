@@ -110,6 +110,7 @@ type ToolResultPart struct {
 	ToolCallID       string
 	ToolName         string       // Name of the tool that was called (for custom tool detection)
 	Result           string       // JSON string result
+	IsError          bool         // True when upstream marks the tool result as failed
 	Images           []*ImagePart // Multimodal tool result (images)
 	Files            []*FilePart  // Multimodal tool result (files)
 	ThoughtSignature string       // Gemini thought signature (decoded from tool call ID for round-trip preservation)
@@ -131,6 +132,7 @@ type Message struct {
 	Role      Role
 	Content   []ContentPart
 	ToolCalls []ToolCall // Populated if Role == RoleAssistant and there are tool calls
+	Metadata  map[string]any
 }
 
 // ToolDefinition represents a tool capability exposed to the model.
@@ -202,21 +204,25 @@ type UnifiedChatRequest struct {
 // UnifiedEvent represents a single event in the chat stream.
 // It is the "Esperanto" response format.
 type UnifiedEvent struct {
-	Type              EventType
-	Content           string       // For EventTypeToken
-	Reasoning         string       // For EventTypeReasoning (model thinking/reasoning content)
-	ReasoningSummary  string       // For EventTypeReasoningSummary (Responses API)
-	ThoughtSignature  string       // For Gemini thought signatures, Claude signatures, OpenAI reasoning_opaque, etc.
-	Refusal           string       // Refusal message (if model refuses to answer)
-	SystemFingerprint string       // System fingerprint
-	ToolCall          *ToolCall    // For EventTypeToolCall
-	Image             *ImagePart   // For EventTypeImage (inline image content)
-	Usage             *Usage       // Optional usage stats on Finish
-	Error             error        // For EventTypeError
-	Logprobs          interface{}  // Log probabilities (if requested)
-	ContentFilter     interface{}  // Content filter results
-	ToolCallIndex     int          // Index for tool call in parallel calls (Responses API)
-	FinishReason      FinishReason // Why generation stopped (for EventTypeFinish)
+	Type               EventType
+	Content            string       // For EventTypeToken
+	Reasoning          string       // For EventTypeReasoning (model thinking/reasoning content)
+	ReasoningSummary   string       // For EventTypeReasoningSummary (Responses API)
+	ThoughtSignature   string       // For Gemini thought signatures, Claude signatures, OpenAI reasoning_opaque, etc.
+	Refusal            string       // Refusal message (if model refuses to answer)
+	SystemFingerprint  string       // System fingerprint
+	ToolCall           *ToolCall    // For EventTypeToolCall
+	Image              *ImagePart   // For EventTypeImage (inline image content)
+	Usage              *Usage       // Optional usage stats on Finish
+	Error              error        // For EventTypeError
+	Logprobs           interface{}  // Log probabilities (if requested)
+	ContentFilter      interface{}  // Content filter results
+	ToolCallIndex      int          // Index for tool call in parallel calls (Responses API)
+	FinishReason       FinishReason // Why generation stopped (for EventTypeFinish)
+	NativeFinishReason string       // Upstream-native terminal signal when available
+	FinishObserved     bool         // Whether completion was explicitly observed upstream
+	FinishInferred     bool         // Whether completion was inferred locally
+	Interrupted        bool         // Whether the upstream stream ended without explicit completion
 }
 
 // ParseOpenAIUsage parses usage statistics from OpenAI response.

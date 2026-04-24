@@ -59,6 +59,7 @@ func ConvertKiroAPIModels(kiroModels []*KiroAPIModel) []*ModelInfo {
 
 	now := time.Now().Unix()
 	result := make([]*ModelInfo, 0, len(kiroModels))
+	seenIDs := make(map[string]struct{}, len(kiroModels))
 
 	for _, km := range kiroModels {
 		// Skip nil models
@@ -73,6 +74,13 @@ func ConvertKiroAPIModels(kiroModels []*KiroAPIModel) []*ModelInfo {
 
 		// Normalize the model ID to kiro-* format
 		normalizedID := normalizeKiroModelID(km.ModelID)
+		if normalizedID == "" {
+			continue
+		}
+		if _, exists := seenIDs[normalizedID]; exists {
+			continue
+		}
+		seenIDs[normalizedID] = struct{}{}
 
 		// Create ModelInfo with converted data
 		info := &ModelInfo{
@@ -96,57 +104,18 @@ func ConvertKiroAPIModels(kiroModels []*KiroAPIModel) []*ModelInfo {
 	return result
 }
 
-// GenerateAgenticVariants creates -agentic variants for each model.
-// Agentic variants are optimized for coding agents with chunked writes.
-//
-// Parameters:
-//   - models: Base models to generate variants for
-//
-// Returns:
-//   - []*ModelInfo: Combined list of base models and their agentic variants
+// GenerateAgenticVariants keeps backward compatibility for callers that still invoke it,
+// but no longer publishes distinct -agentic variants.
 func GenerateAgenticVariants(models []*ModelInfo) []*ModelInfo {
 	if len(models) == 0 {
 		return nil
 	}
-
-	// Pre-allocate result with capacity for both base models and variants
-	result := make([]*ModelInfo, 0, len(models)*2)
-
+	result := make([]*ModelInfo, 0, len(models))
 	for _, model := range models {
-		if model == nil {
-			continue
+		if model != nil {
+			result = append(result, model)
 		}
-
-		// Add the base model first
-		result = append(result, model)
-
-		// Skip if model already has -agentic suffix
-		if strings.HasSuffix(model.ID, "-agentic") {
-			continue
-		}
-
-		// Skip special models that shouldn't have agentic variants
-		if model.ID == "kiro-auto" {
-			continue
-		}
-
-		// Create agentic variant
-		agenticModel := &ModelInfo{
-			ID:                  model.ID + "-agentic",
-			Object:              model.Object,
-			Created:             model.Created,
-			OwnedBy:             model.OwnedBy,
-			Type:                model.Type,
-			DisplayName:         model.DisplayName + " (Agentic)",
-			Description:         generateAgenticDescription(model.Description),
-			ContextLength:       model.ContextLength,
-			MaxCompletionTokens: model.MaxCompletionTokens,
-			Thinking:            cloneThinkingSupport(model.Thinking),
-		}
-
-		result = append(result, agenticModel)
 	}
-
 	return result
 }
 
@@ -232,6 +201,10 @@ func normalizeKiroModelID(modelID string) string {
 
 	// Trim whitespace
 	modelID = strings.TrimSpace(modelID)
+	modelID = strings.TrimSuffix(modelID, "-agentic")
+	if modelID == "" {
+		return ""
+	}
 
 	// Replace dots with hyphens (e.g., 4.5 → 4-5)
 	normalized := strings.ReplaceAll(modelID, ".", "-")
@@ -261,14 +234,6 @@ func generateKiroDisplayName(modelName, normalizedID string) string {
 		}
 	}
 	return "Kiro " + strings.Join(words, " ")
-}
-
-// generateAgenticDescription creates description for agentic variants.
-func generateAgenticDescription(baseDescription string) string {
-	if baseDescription == "" {
-		return "Optimized for coding agents with chunked writes"
-	}
-	return baseDescription + " (Agentic mode: chunked writes)"
 }
 
 // getContextLength returns the context length, using default if not provided.

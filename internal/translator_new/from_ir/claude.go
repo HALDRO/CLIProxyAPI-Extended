@@ -60,6 +60,11 @@ func NewClaudeStreamStateWithSessionID(sessionID string) *ClaudeStreamState {
 
 // DeriveSessionID generates a stable session ID from the request.
 func DeriveSessionID(rawJSON []byte) string {
+	if sid := strings.TrimSpace(gjson.GetBytes(rawJSON, "metadata.user_id").String()); sid != "" {
+		if extracted := strings.TrimSpace(gjson.Get(sid, "session_id").String()); extracted != "" {
+			return extracted
+		}
+	}
 	messages := gjson.GetBytes(rawJSON, "messages")
 	if !messages.IsArray() {
 		return ""
@@ -659,6 +664,13 @@ func emitFinish(usage *ir.Usage, finishReason ir.FinishReason, state *ClaudeStre
 	}
 
 	var result strings.Builder
+	if state != nil && state.CurrentToolBlockIndex > 0 {
+		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]interface{}{
+			"type":  ir.ClaudeSSEContentBlockStop,
+			"index": state.CurrentToolBlockIndex,
+		}))
+		state.CurrentToolBlockIndex = 0
+	}
 	if state != nil && state.TextBlockStarted && !state.TextBlockStopped {
 		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]interface{}{
 			"type":  ir.ClaudeSSEContentBlockStop,
