@@ -119,8 +119,10 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 			}
 		}
 
-		// Only process successful responses for gzip decompression
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// A missing Content-Encoding header is an upstream framing bug, not a
+		// semantic property of the status code. Decompress error payloads too so
+		// callers and tests can inspect the real JSON body.
+		if resp.Body == nil {
 			return nil
 		}
 
