@@ -426,6 +426,9 @@ func ToOpenAIChatCompletionMeta(messages []ir.Message, usage *ir.Usage, model, m
 		if tcs := builder.BuildOpenAIToolCalls(); tcs != nil {
 			msgContent["tool_calls"] = tcs
 		}
+		if images := buildAssistantImages(*msg); len(images) > 0 {
+			msgContent["images"] = images
+		}
 
 		// Determine finish_reason:
 		// - If tool calls exist: tool_calls
@@ -697,7 +700,33 @@ func buildOpenAIAssistantMessage(msg ir.Message) map[string]interface{} {
 		}
 		result["tool_calls"] = tcs
 	}
+	images := buildAssistantImages(msg)
+	if len(images) > 0 {
+		result["images"] = images
+	}
 	return result
+}
+
+func buildAssistantImages(msg ir.Message) []interface{} {
+	images := make([]interface{}, 0)
+	for _, part := range msg.Content {
+		if part.Type != ir.ContentTypeImage || part.Image == nil {
+			continue
+		}
+		imageURL := part.Image.URL
+		if imageURL == "" && part.Image.Data != "" {
+			imageURL = fmt.Sprintf("data:%s;base64,%s", part.Image.MimeType, part.Image.Data)
+		}
+		if imageURL == "" {
+			continue
+		}
+		images = append(images, map[string]interface{}{
+			"index":     len(images),
+			"type":      "image_url",
+			"image_url": map[string]string{"url": imageURL},
+		})
+	}
+	return images
 }
 
 func buildOpenAIToolMessage(msg ir.Message) map[string]interface{} {
@@ -779,6 +808,17 @@ func ToResponsesAPIResponse(messages []ir.Message, usage *ir.Usage, model string
 				"call_id": tc.ID, "name": tc.Name, "arguments": tc.Args,
 			})
 		}
+		for _, part := range msg.Content {
+			if part.Type != ir.ContentTypeImage || part.Image == nil || part.Image.Data == "" {
+				continue
+			}
+			output = append(output, map[string]interface{}{
+				"id":            fmt.Sprintf("img_%s_%d", responseID, len(output)),
+				"type":          "image_generation_call",
+				"output_format": mimeTypeToCodexOutputFormat(part.Image.MimeType),
+				"result":        part.Image.Data,
+			})
+		}
 	}
 
 	if len(output) > 0 {
@@ -812,6 +852,25 @@ func addResponsesUsage(response map[string]interface{}, usageMap map[string]inte
 		responsesUsage["output_tokens_details"] = map[string]interface{}{"reasoning_tokens": thoughtsTokens}
 	}
 	response["usage"] = responsesUsage
+}
+
+func mimeTypeToCodexOutputFormat(mimeType string) string {
+	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
+	switch mimeType {
+	case "image/jpeg":
+		return "jpeg"
+	case "image/webp":
+		return "webp"
+	case "image/gif":
+		return "gif"
+	case "image/png", "":
+		return "png"
+	default:
+		if strings.HasPrefix(mimeType, "image/") {
+			return strings.TrimPrefix(mimeType, "image/")
+		}
+		return "png"
+	}
 }
 
 // ResponsesStreamState holds state for Responses API streaming conversion.

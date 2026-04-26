@@ -278,7 +278,7 @@ func TranslateClaudeResponseStream(cfg *config.Config, to sdktranslator.Format, 
 	var chunks [][]byte
 
 	switch toStr {
-	case "openai", "openai-response":
+	case "openai":
 		for _, event := range events {
 			chunk, err := from_ir.ToOpenAIChunk(event, model, msgID, event.ToolCallIndex)
 			if err != nil {
@@ -286,6 +286,18 @@ func TranslateClaudeResponseStream(cfg *config.Config, to sdktranslator.Format, 
 			}
 			if chunk != nil {
 				chunks = append(chunks, chunk)
+			}
+		}
+	case "openai-response":
+		stateResponses := from_ir.NewResponsesStreamState()
+		stateResponses.ResponseID = msgID
+		for _, event := range events {
+			responseChunks, err := from_ir.ToResponsesAPIChunk(event, model, stateResponses)
+			if err != nil {
+				return nil, err
+			}
+			for _, responseChunk := range responseChunks {
+				chunks = append(chunks, []byte(responseChunk))
 			}
 		}
 	case "ollama":
@@ -342,7 +354,7 @@ func convertUnifiedEventsToChunks(events []ir.UnifiedEvent, to sdktranslator.For
 	toStr := to.String()
 
 	switch toStr {
-	case "openai", "openai-response":
+	case "openai":
 		for i := range events {
 			event := &events[i]
 
@@ -465,6 +477,19 @@ func convertUnifiedEventsToChunks(events []ir.UnifiedEvent, to sdktranslator.For
 			}
 		}
 
+	case "openai-response":
+		responsesState := from_ir.NewResponsesStreamState()
+		responsesState.ResponseID = messageID
+		for _, event := range events {
+			responseChunks, err := from_ir.ToResponsesAPIChunk(event, model, responsesState)
+			if err != nil {
+				return nil, err
+			}
+			for _, responseChunk := range responseChunks {
+				chunks = append(chunks, []byte(responseChunk))
+			}
+		}
+
 	case "ollama":
 		for _, event := range events {
 			chunk, err := from_ir.ToOllamaChatChunk(event, model)
@@ -532,7 +557,7 @@ func TranslateAntigravityResponseNonStream(cfg *config.Config, to sdktranslator.
 
 	// Special handling for OpenAI targets to include upstream metadata (finish_reason, timestamps)
 	toStr := to.String()
-	if toStr == "openai" || toStr == "openai-response" {
+	if toStr == "openai" {
 		var openaiMeta *ir.OpenAIMeta
 		if meta != nil {
 			openaiMeta = &ir.OpenAIMeta{
@@ -545,6 +570,20 @@ func TranslateAntigravityResponseNonStream(cfg *config.Config, to sdktranslator.
 			}
 		}
 		return from_ir.ToOpenAIChatCompletionMeta(messages, usage, model, messageID, openaiMeta)
+	}
+	if toStr == "openai-response" {
+		var openaiMeta *ir.OpenAIMeta
+		if meta != nil {
+			openaiMeta = &ir.OpenAIMeta{
+				ResponseID:         meta.ResponseID,
+				CreateTime:         meta.CreateTime,
+				NativeFinishReason: meta.NativeFinishReason,
+			}
+			if usage != nil {
+				openaiMeta.ThoughtsTokenCount = usage.ThoughtsTokenCount
+			}
+		}
+		return from_ir.ToResponsesAPIResponse(messages, usage, model, openaiMeta)
 	}
 
 	return convertIRToNonStreamResponse(to, messages, usage, model, messageID)
@@ -573,7 +612,7 @@ func TranslateGeminiResponseNonStream(cfg *config.Config, to sdktranslator.Forma
 
 	// Special handling for OpenAI targets to include Gemini metadata
 	toStr := to.String()
-	if toStr == "openai" || toStr == "openai-response" {
+	if toStr == "openai" {
 		var openaiMeta *ir.OpenAIMeta
 		if meta != nil {
 			openaiMeta = &ir.OpenAIMeta{
@@ -586,6 +625,20 @@ func TranslateGeminiResponseNonStream(cfg *config.Config, to sdktranslator.Forma
 			}
 		}
 		return from_ir.ToOpenAIChatCompletionMeta(messages, usage, model, messageID, openaiMeta)
+	}
+	if toStr == "openai-response" {
+		var openaiMeta *ir.OpenAIMeta
+		if meta != nil {
+			openaiMeta = &ir.OpenAIMeta{
+				ResponseID:         meta.ResponseID,
+				CreateTime:         meta.CreateTime,
+				NativeFinishReason: meta.NativeFinishReason,
+			}
+			if usage != nil {
+				openaiMeta.ThoughtsTokenCount = usage.ThoughtsTokenCount
+			}
+		}
+		return from_ir.ToResponsesAPIResponse(messages, usage, model, openaiMeta)
 	}
 
 	return convertIRToNonStreamResponse(to, messages, usage, model, messageID)
@@ -615,8 +668,10 @@ func TranslateOpenAIResponseNonStream(cfg *config.Config, to sdktranslator.Forma
 // convertIRToNonStreamResponse is the common finisher for non-stream responses.
 func convertIRToNonStreamResponse(to sdktranslator.Format, messages []ir.Message, usage *ir.Usage, model, messageID string) ([]byte, error) {
 	switch to.String() {
-	case "openai", "openai-response":
+	case "openai":
 		return from_ir.ToOpenAIChatCompletion(messages, usage, model, messageID)
+	case "openai-response":
+		return from_ir.ToResponsesAPIResponse(messages, usage, model, nil)
 	case "claude":
 		return from_ir.ToClaudeResponse(messages, usage, model, messageID)
 	case "ollama":

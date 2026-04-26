@@ -447,6 +447,19 @@ func ParseOpenAIResponse(rawJSON []byte) ([]ir.Message, *ir.Usage, error) {
 	if content := message.Get("content"); content.Exists() && content.String() != "" {
 		msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: content.String()})
 	}
+	for _, imgResult := range message.Get("images").Array() {
+		imgURL := strings.TrimSpace(imgResult.Get("image_url.url").String())
+		if imgURL == "" {
+			continue
+		}
+		if img := parseDataURI(imgURL); img != nil {
+			msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeImage, Image: img})
+			continue
+		}
+		if strings.HasPrefix(imgURL, "http://") || strings.HasPrefix(imgURL, "https://") {
+			msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeImage, Image: &ir.ImagePart{URL: imgURL}})
+		}
+	}
 	msg.ToolCalls = append(msg.ToolCalls, ir.ParseOpenAIStyleToolCalls(message.Get("tool_calls").Array())...)
 
 	if len(msg.Content) == 0 && len(msg.ToolCalls) == 0 {
@@ -486,6 +499,19 @@ func parseResponsesAPIOutput(output gjson.Result, usage *ir.Usage) ([]ir.Message
 					ID: item.Get("call_id").String(), Name: item.Get("name").String(), Args: item.Get("arguments").String(),
 				}},
 			})
+		case "image_generation_call":
+			img := parseCodexImageGenerationItem(item)
+			if img == nil {
+				continue
+			}
+			if len(messages) > 0 && messages[len(messages)-1].Role == ir.RoleAssistant {
+				messages[len(messages)-1].Content = append(messages[len(messages)-1].Content, ir.ContentPart{Type: ir.ContentTypeImage, Image: img})
+			} else {
+				messages = append(messages, ir.Message{
+					Role:    ir.RoleAssistant,
+					Content: []ir.ContentPart{{Type: ir.ContentTypeImage, Image: img}},
+				})
+			}
 		}
 	}
 	return messages, usage, nil
@@ -612,6 +638,19 @@ func ParseOpenAIChunk(rawJSON []byte) ([]ir.UnifiedEvent, error) {
 			ToolCallIndex: tcIndex,
 		})
 	}
+	for _, imgResult := range delta.Get("images").Array() {
+		imgURL := strings.TrimSpace(imgResult.Get("image_url.url").String())
+		if imgURL == "" {
+			continue
+		}
+		if img := parseDataURI(imgURL); img != nil {
+			events = append(events, ir.UnifiedEvent{Type: ir.EventTypeImage, Image: img})
+			continue
+		}
+		if strings.HasPrefix(imgURL, "http://") || strings.HasPrefix(imgURL, "https://") {
+			events = append(events, ir.UnifiedEvent{Type: ir.EventTypeImage, Image: &ir.ImagePart{URL: imgURL}})
+		}
+	}
 
 	finishReason := choice.Get("finish_reason")
 	if finishReason.Exists() && finishReason.String() != "" {
@@ -728,8 +767,17 @@ func parseResponsesStreamEvent(eventType string, root gjson.Result) ([]ir.Unifie
 		}
 	case "response.content_part.done":
 		// Similar to above, ignore done events for content parts to avoid duplication
+	case "response.image_generation_call.partial_image":
+		if img := parseResponsesStreamImage(root.Get("partial_image_b64").String(), root.Get("output_format").String()); img != nil {
+			events = append(events, ir.UnifiedEvent{Type: ir.EventTypeImage, Image: img})
+		}
 	case "response.output_item.done":
-		// Ignore item done events
+		item := root.Get("item")
+		if item.Get("type").String() == "image_generation_call" {
+			if img := parseResponsesStreamImage(item.Get("result").String(), item.Get("output_format").String()); img != nil {
+				events = append(events, ir.UnifiedEvent{Type: ir.EventTypeImage, Image: img})
+			}
+		}
 	case "response.completed":
 		event := ir.UnifiedEvent{Type: ir.EventTypeFinish, FinishReason: ir.FinishReasonStop}
 		if u := root.Get("response.usage"); u.Exists() {
@@ -1108,6 +1156,40 @@ func parseDataURI(url string) *ir.ImagePart {
 		mime = parts[0][5:idx]
 	}
 	return &ir.ImagePart{MimeType: mime, Data: parts[1]}
+}
+
+func parseResponsesStreamImage(data, outputFormat string) *ir.ImagePart {
+	data = strings.TrimSpace(data)
+	if data == "" {
+		return nil
+	}
+	return &ir.ImagePart{MimeType: codexOutputFormatToMimeType(outputFormat), Data: data}
+}
+
+func parseCodexImageGenerationItem(item gjson.Result) *ir.ImagePart {
+	return parseResponsesStreamImage(item.Get("result").String(), item.Get("output_format").String())
+}
+
+func codexOutputFormatToMimeType(outputFormat string) string {
+	outputFormat = strings.TrimSpace(outputFormat)
+	if outputFormat == "" {
+		return "image/png"
+	}
+	if strings.Contains(outputFormat, "/") {
+		return outputFormat
+	}
+	switch strings.ToLower(outputFormat) {
+	case "png":
+		return "image/png"
+	case "jpg", "jpeg":
+		return "image/jpeg"
+	case "webp":
+		return "image/webp"
+	case "gif":
+		return "image/gif"
+	default:
+		return "image/png"
+	}
 }
 
 // parseLocalFileImage reads a local file and converts it to base64 ImagePart.
