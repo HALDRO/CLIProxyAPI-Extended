@@ -37,6 +37,7 @@ type ClaudeStreamState struct {
 	Model                  string
 	SessionID              string
 	CurrentThinkingText    strings.Builder
+	CurrentThinkingSig     string
 	TextBlockIndex         int
 	NextContentBlockIndex  int
 	ActiveContentBlockType string
@@ -48,6 +49,7 @@ type ClaudeStreamState struct {
 	HasToolCalls           bool
 	HasContent             bool
 	FinishSent             bool
+	ThinkingSummarySeen    bool
 }
 
 func NewClaudeStreamState() *ClaudeStreamState {
@@ -294,31 +296,34 @@ func ToClaudeSSE(event ir.UnifiedEvent, model, messageID string, state *ClaudeSt
 
 	switch event.Type {
 	case ir.EventTypeToken:
+		result.WriteString(flushPendingThinkingBlock(state))
 		result.WriteString(emitTextDelta(event.Content, state))
 	case ir.EventTypeReasoning:
 		// Always emit thinking_delta for reasoning content
 		// ThoughtSignature like "xai-responses-v1" is a format identifier, not a cryptographic signature
 		// Real signatures are longer and used for verification (e.g., Claude's signature_delta)
-		if event.Reasoning != "" {
-			result.WriteString(emitThinkingDelta(event.Reasoning, state))
+		if state != nil && event.ThoughtSignature != "" {
+			state.CurrentThinkingSig = event.ThoughtSignature
 		}
-		// Only emit signature_delta for real cryptographic signatures (not format identifiers)
-		// Real signatures are typically longer than 30 chars and don't contain common format patterns
-		if event.ThoughtSignature != "" && len(event.ThoughtSignature) > 30 &&
-			!strings.Contains(event.ThoughtSignature, "responses-v") &&
-			!strings.Contains(event.ThoughtSignature, "format") {
-			result.WriteString(emitSignatureDelta(event.ThoughtSignature, state))
+		if event.Reasoning != "" {
+			if state != nil {
+				state.ThinkingSummarySeen = true
+			}
+			result.WriteString(emitThinkingDelta(event.Reasoning, state))
 		}
 	case ir.EventTypeToolCall:
 		if event.ToolCall != nil {
+			result.WriteString(flushPendingThinkingBlock(state))
 			result.WriteString(emitToolCall(event.ToolCall, state))
 		}
 	case ir.EventTypeToolCallDelta:
 		// Handle streaming tool call argument deltas
 		if event.ToolCall != nil && state != nil {
+			result.WriteString(flushPendingThinkingBlock(state))
 			result.WriteString(emitToolCallDelta(event.ToolCall, state))
 		}
 	case ir.EventTypeFinish:
+		result.WriteString(flushPendingThinkingBlock(state))
 		if state != nil && state.FinishSent {
 			return nil, nil
 		}
@@ -574,6 +579,58 @@ func emitSignatureDelta(signature string, state *ClaudeStreamState) string {
 		"type": ir.ClaudeSSEContentBlockDelta, "index": idx,
 		"delta": map[string]interface{}{"type": "signature_delta", "signature": signature},
 	}))
+	return result.String()
+}
+
+func emitSignatureOnlyThinkingBlock(signature string, state *ClaudeStreamState) string {
+	if strings.TrimSpace(signature) == "" {
+		return ""
+	}
+	var result strings.Builder
+	if state != nil {
+		result.WriteString(ensureContentBlock(state, ir.ClaudeBlockThinking))
+	}
+	result.WriteString(emitSignatureDelta(signature, state))
+	if state != nil && state.TextBlockStarted && !state.TextBlockStopped {
+		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]interface{}{
+			"type":  ir.ClaudeSSEContentBlockStop,
+			"index": state.TextBlockIndex,
+		}))
+		state.TextBlockStopped = true
+		state.CurrentThinkingSig = ""
+		state.ThinkingSummarySeen = false
+	}
+	return result.String()
+}
+
+func flushPendingThinkingBlock(state *ClaudeStreamState) string {
+	if state == nil {
+		return ""
+	}
+	signature := strings.TrimSpace(state.CurrentThinkingSig)
+	if signature == "" {
+		return ""
+	}
+	if len(signature) <= 30 || strings.Contains(signature, "responses-v") || strings.Contains(signature, "format") {
+		state.CurrentThinkingSig = ""
+		state.ThinkingSummarySeen = false
+		return ""
+	}
+	var result strings.Builder
+	if !state.ThinkingSummarySeen {
+		result.WriteString(emitSignatureOnlyThinkingBlock(signature, state))
+		return result.String()
+	}
+	result.WriteString(emitSignatureDelta(signature, state))
+	if state.TextBlockStarted && !state.TextBlockStopped && state.ActiveContentBlockType == ir.ClaudeBlockThinking {
+		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]interface{}{
+			"type":  ir.ClaudeSSEContentBlockStop,
+			"index": state.TextBlockIndex,
+		}))
+		state.TextBlockStopped = true
+	}
+	state.CurrentThinkingSig = ""
+	state.ThinkingSummarySeen = false
 	return result.String()
 }
 

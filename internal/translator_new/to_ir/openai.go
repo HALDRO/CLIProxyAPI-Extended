@@ -484,10 +484,14 @@ func parseResponsesAPIOutput(output gjson.Result, usage *ir.Usage) ([]ir.Message
 			}
 		case "reasoning":
 			msg := ir.Message{Role: ir.RoleAssistant}
+			signature := strings.TrimSpace(item.Get("encrypted_content").String())
 			for _, s := range item.Get("summary").Array() {
 				if s.Get("type").String() == "summary_text" {
-					msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeReasoning, Reasoning: s.Get("text").String()})
+					msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeReasoning, Reasoning: s.Get("text").String(), ThoughtSignature: signature})
 				}
+			}
+			if len(msg.Content) == 0 && signature != "" {
+				msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeReasoning, ThoughtSignature: signature})
 			}
 			if len(msg.Content) > 0 {
 				messages = append(messages, msg)
@@ -773,6 +777,15 @@ func parseResponsesStreamEvent(eventType string, root gjson.Result) ([]ir.Unifie
 		}
 	case "response.output_item.done":
 		item := root.Get("item")
+		if item.Get("type").String() == "reasoning" {
+			signature := strings.TrimSpace(item.Get("encrypted_content").String())
+			if signature != "" {
+				events = append(events, ir.UnifiedEvent{
+					Type:             ir.EventTypeReasoning,
+					ThoughtSignature: signature,
+				})
+			}
+		}
 		if item.Get("type").String() == "image_generation_call" {
 			if img := parseResponsesStreamImage(item.Get("result").String(), item.Get("output_format").String()); img != nil {
 				events = append(events, ir.UnifiedEvent{Type: ir.EventTypeImage, Image: img})

@@ -308,6 +308,20 @@ func convertMessageToResponsesInputWithContext(msg ir.Message, ctx *toolCallCont
 		return nil
 	case ir.RoleAssistant:
 		var items []interface{}
+		for _, part := range msg.Content {
+			if part.Type != ir.ContentTypeReasoning || strings.TrimSpace(part.ThoughtSignature) == "" {
+				continue
+			}
+			if !looksLikeCodexEncryptedReasoning(part.ThoughtSignature) {
+				continue
+			}
+			items = append(items, map[string]interface{}{
+				"type":              "reasoning",
+				"summary":           []interface{}{},
+				"content":           nil,
+				"encrypted_content": part.ThoughtSignature,
+			})
+		}
 		// First, add text content as a message (if any)
 		if text := ir.CombineTextParts(msg); text != "" {
 			items = append(items, map[string]interface{}{
@@ -349,6 +363,20 @@ func convertMessageToResponsesInputWithContext(msg ir.Message, ctx *toolCallCont
 		return items
 	}
 	return nil
+}
+
+func looksLikeCodexEncryptedReasoning(signature string) bool {
+	signature = strings.TrimSpace(signature)
+	if signature == "" {
+		return false
+	}
+	if strings.HasPrefix(signature, "gAAAA") {
+		return true
+	}
+	if strings.Contains(signature, "responses-v") || strings.Contains(signature, "format") {
+		return false
+	}
+	return false
 }
 
 func buildResponsesUserMessage(msg ir.Message) interface{} {
@@ -790,10 +818,14 @@ func ToResponsesAPIResponse(messages []ir.Message, usage *ir.Usage, model string
 			continue
 		}
 		if reasoning := ir.CombineReasoningParts(msg); reasoning != "" {
-			output = append(output, map[string]interface{}{
+			reasoningItem := map[string]interface{}{
 				"id": fmt.Sprintf("rs_%s", responseID), "type": "reasoning",
 				"summary": []interface{}{map[string]interface{}{"type": "summary_text", "text": reasoning}},
-			})
+			}
+			if signature := strings.TrimSpace(ir.GetFirstReasoningSignature(msg)); signature != "" {
+				reasoningItem["encrypted_content"] = signature
+			}
+			output = append(output, reasoningItem)
 		}
 		if text := ir.CombineTextParts(msg); text != "" {
 			outputText = text

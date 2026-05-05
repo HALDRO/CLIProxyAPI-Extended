@@ -79,11 +79,10 @@ func ParseClaudeContentBlock(block gjson.Result, msg *Message) {
 			msg.Content = append(msg.Content, ContentPart{Type: ContentTypeText, Text: text})
 		}
 	case ClaudeBlockThinking:
-		if thinking := block.Get("thinking").String(); thinking != "" {
-			part := ContentPart{Type: ContentTypeReasoning, Reasoning: thinking}
-			if sig := block.Get("signature").String(); sig != "" {
-				part.ThoughtSignature = sig
-			}
+		thinking := block.Get("thinking").String()
+		signature := block.Get("signature").String()
+		if thinking != "" || signature != "" {
+			part := ContentPart{Type: ContentTypeReasoning, Reasoning: thinking, ThoughtSignature: signature}
 			msg.Content = append(msg.Content, part)
 		}
 	case ClaudeBlockImage:
