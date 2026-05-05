@@ -75,6 +75,9 @@ usage-statistics-enabled: false
 # This is purely visual and does not affect model routing to providers
 # Default: true (enabled)
 show-provider-prefixes: true
+# How long (in seconds) Redis usage queue items are retained in memory for the RESP interface (LPOP/RPOP).
+# Default: 60. Max: 3600.
+redis-usage-queue-retention-seconds: 60
 
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
@@ -111,6 +114,11 @@ max-retry-interval: 30
 # When true, disable auth/model cooldown scheduling globally (prevents blackout windows after failure states).
 disable-cooling: false
 
+# disable-image-generation supports: false (default), true, or "chat".
+# - true: disable image_generation everywhere (also returns 404 for /v1/images/generations and /v1/images/edits).
+# - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations and /v1/images/edits enabled.
+disable-image-generation: false
+
 # Core auth auto-refresh worker pool size (OAuth/file-based auth token refresh).
 # When > 0, overrides the default worker count (16).
 # auth-auto-refresh-workers: 16
@@ -125,8 +133,9 @@ quota-exceeded:
 routing:
   strategy: "round-robin" # round-robin (default), fill-first
   # Enable universal session-sticky routing for all clients.
-  # Session IDs are extracted from: X-Session-ID header, Idempotency-Key,
-  # metadata.user_id, conversation_id, or first few messages hash.
+  # Session IDs are extracted from: metadata.user_id (Claude Code session format),
+  # X-Session-ID, Session_id (Codex), X-Amp-Thread-Id (Amp CLI),
+  # X-Client-Request-Id (PI), conversation_id, or first few messages hash.
   # Automatic failover is always enabled when bound auth becomes unavailable.
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h

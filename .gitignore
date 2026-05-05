@@ -71,3 +71,4 @@ _wgun/
 .venv/
 *.bak
 internal/translator_new/wdev_test/
+.gocache/
