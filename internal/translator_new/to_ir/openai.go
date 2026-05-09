@@ -752,7 +752,38 @@ func parseResponsesStreamEvent(eventType string, root gjson.Result) ([]ir.Unifie
 			})
 		}
 	case "response.custom_tool_call_input.done":
-		// Ignore done events to avoid duplication (same as function_call_arguments.done)
+		input := root.Get("input")
+		inputStr := ""
+		if input.Exists() {
+			if input.Type == gjson.String {
+				inputStr = input.String()
+			} else {
+				inputStr = input.Raw
+			}
+		}
+		if inputStr == "" {
+			if args := root.Get("arguments"); args.Exists() {
+				inputStr = args.String()
+			}
+		}
+		if inputStr == "" {
+			if delta := root.Get("delta"); delta.Exists() {
+				inputStr = delta.String()
+			}
+		}
+		if inputStr != "" {
+			events = append(events, ir.UnifiedEvent{
+				Type: ir.EventTypeToolCallDelta,
+				ToolCall: &ir.ToolCall{
+					ID:       root.Get("call_id").String(),
+					ItemID:   root.Get("item_id").String(),
+					Name:     root.Get("name").String(),
+					Args:     inputStr,
+					IsCustom: true,
+				},
+				ToolCallIndex: int(root.Get("output_index").Int()),
+			})
+		}
 	case "response.function_call_arguments.done":
 		// Emit full sanitized arguments on done.
 		if args := root.Get("arguments"); args.Exists() {
@@ -777,6 +808,42 @@ func parseResponsesStreamEvent(eventType string, root gjson.Result) ([]ir.Unifie
 		}
 	case "response.output_item.done":
 		item := root.Get("item")
+		if item.Get("type").String() == "function_call" {
+			events = append(events, ir.UnifiedEvent{
+				Type: ir.EventTypeToolCallDelta,
+				ToolCall: &ir.ToolCall{
+					ID:         item.Get("call_id").String(),
+					ItemID:     item.Get("id").String(),
+					Name:       item.Get("name").String(),
+					Args:       sanitizeCodexGrepArgs(item.Get("name").String(), item.Get("arguments").String()),
+					IsComplete: true,
+				},
+				ToolCallIndex: int(root.Get("output_index").Int()),
+			})
+		}
+		if item.Get("type").String() == "custom_tool_call" {
+			input := item.Get("input")
+			inputStr := ""
+			if input.Exists() {
+				if input.Type == gjson.String {
+					inputStr = input.String()
+				} else {
+					inputStr = input.Raw
+				}
+			}
+			events = append(events, ir.UnifiedEvent{
+				Type: ir.EventTypeToolCallDelta,
+				ToolCall: &ir.ToolCall{
+					ID:         item.Get("call_id").String(),
+					ItemID:     item.Get("id").String(),
+					Name:       item.Get("name").String(),
+					Args:       inputStr,
+					IsCustom:   true,
+					IsComplete: true,
+				},
+				ToolCallIndex: int(root.Get("output_index").Int()),
+			})
+		}
 		if item.Get("type").String() == "reasoning" {
 			signature := strings.TrimSpace(item.Get("encrypted_content").String())
 			if signature != "" {
@@ -808,6 +875,12 @@ func parseResponsesStreamEvent(eventType string, root gjson.Result) ([]ir.Unifie
 			if u := root.Get("usage"); u.Exists() {
 				event.Usage = ir.ParseOpenAIUsage(u)
 			}
+		}
+		events = append(events, event)
+	case "response.incomplete":
+		event := ir.UnifiedEvent{Type: ir.EventTypeFinish, FinishReason: ir.FinishReasonLength}
+		if u := root.Get("response.usage"); u.Exists() {
+			event.Usage = ir.ParseOpenAIUsage(u)
 		}
 		events = append(events, event)
 	case "error":

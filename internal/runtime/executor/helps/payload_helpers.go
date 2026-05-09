@@ -17,16 +17,21 @@ import (
 // against the original payload when provided. requestedModel carries the client-visible
 // model name before alias resolution so payload rules can target aliases precisely.
 // requestPath is the inbound HTTP request path (when available) used for endpoint-scoped gates.
-func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string, payload, original []byte, requestedModel string, requestPath string) []byte {
+// It is optional to keep existing non-V2 callsites source-compatible.
+func ApplyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string, payload, original []byte, requestedModel string, requestPath ...string) []byte {
 	if cfg == nil || len(payload) == 0 {
 		return payload
 	}
 	out := payload
+	resolvedRequestPath := ""
+	if len(requestPath) > 0 {
+		resolvedRequestPath = strings.TrimSpace(requestPath[0])
+	}
 
 	// Apply disable-image-generation filtering before payload rules so config payload
 	// overrides can explicitly re-enable image_generation when desired.
 	if cfg.DisableImageGeneration != config.DisableImageGenerationOff {
-		if cfg.DisableImageGeneration != config.DisableImageGenerationChat || !isImagesEndpointRequestPath(requestPath) {
+		if cfg.DisableImageGeneration != config.DisableImageGenerationChat || !isImagesEndpointRequestPath(resolvedRequestPath) {
 			out = removeToolTypeFromPayloadWithRoot(out, root, "image_generation")
 			out = removeToolChoiceFromPayloadWithRoot(out, root, "image_generation")
 		}

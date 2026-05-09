@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -50,14 +51,28 @@ type ClaudeStreamState struct {
 	HasContent             bool
 	FinishSent             bool
 	ThinkingSummarySeen    bool
+	ToolBlockIndexBySource map[int]int
+	ToolBlockIndexByID     map[string]int
+	OpenToolBlockIndexes   map[int]bool
+	ToolBlockArgsEmitted   map[int]bool
 }
 
 func NewClaudeStreamState() *ClaudeStreamState {
-	return &ClaudeStreamState{TextBlockIndex: 0, NextContentBlockIndex: 0, ToolBlockCount: 0}
+	return &ClaudeStreamState{
+		TextBlockIndex:         0,
+		NextContentBlockIndex:  0,
+		ToolBlockCount:         0,
+		ToolBlockIndexBySource: make(map[int]int),
+		ToolBlockIndexByID:     make(map[string]int),
+		OpenToolBlockIndexes:   make(map[int]bool),
+		ToolBlockArgsEmitted:   make(map[int]bool),
+	}
 }
 
 func NewClaudeStreamStateWithSessionID(sessionID string) *ClaudeStreamState {
-	return &ClaudeStreamState{TextBlockIndex: 0, NextContentBlockIndex: 0, ToolBlockCount: 0, SessionID: sessionID}
+	state := NewClaudeStreamState()
+	state.SessionID = sessionID
+	return state
 }
 
 // DeriveSessionID generates a stable session ID from the request.
@@ -314,13 +329,13 @@ func ToClaudeSSE(event ir.UnifiedEvent, model, messageID string, state *ClaudeSt
 	case ir.EventTypeToolCall:
 		if event.ToolCall != nil {
 			result.WriteString(flushPendingThinkingBlock(state))
-			result.WriteString(emitToolCall(event.ToolCall, state))
+			result.WriteString(emitToolCall(event, state))
 		}
 	case ir.EventTypeToolCallDelta:
 		// Handle streaming tool call argument deltas
 		if event.ToolCall != nil && state != nil {
 			result.WriteString(flushPendingThinkingBlock(state))
-			result.WriteString(emitToolCallDelta(event.ToolCall, state))
+			result.WriteString(emitToolCallDelta(event, state))
 		}
 	case ir.EventTypeFinish:
 		result.WriteString(flushPendingThinkingBlock(state))
@@ -353,7 +368,11 @@ func ToClaudeResponse(messages []ir.Message, usage *ir.Usage, model, messageID s
 		response["stop_reason"] = ir.ClaudeStopToolUse
 	}
 	if usage != nil {
-		response["usage"] = map[string]interface{}{"input_tokens": usage.PromptTokens, "output_tokens": usage.CompletionTokens}
+		usagePayload := map[string]interface{}{"input_tokens": usage.PromptTokens, "output_tokens": usage.CompletionTokens}
+		if usage.CachedTokens > 0 {
+			usagePayload["cache_read_input_tokens"] = usage.CachedTokens
+		}
+		response["usage"] = usagePayload
 	}
 	return json.Marshal(response)
 }
@@ -634,7 +653,92 @@ func flushPendingThinkingBlock(state *ClaudeStreamState) string {
 	return result.String()
 }
 
-func emitToolCall(tc *ir.ToolCall, state *ClaudeStreamState) string {
+func ensureToolBlockState(state *ClaudeStreamState) {
+	if state == nil {
+		return
+	}
+	if state.ToolBlockIndexBySource == nil {
+		state.ToolBlockIndexBySource = make(map[int]int)
+	}
+	if state.ToolBlockIndexByID == nil {
+		state.ToolBlockIndexByID = make(map[string]int)
+	}
+	if state.OpenToolBlockIndexes == nil {
+		state.OpenToolBlockIndexes = make(map[int]bool)
+	}
+	if state.ToolBlockArgsEmitted == nil {
+		state.ToolBlockArgsEmitted = make(map[int]bool)
+	}
+}
+
+func registerToolBlock(state *ClaudeStreamState, tc *ir.ToolCall, sourceIdx, blockIdx int) {
+	if state == nil {
+		return
+	}
+	ensureToolBlockState(state)
+	state.ToolBlockIndexBySource[sourceIdx] = blockIdx
+	if tc != nil {
+		if tc.ItemID != "" {
+			state.ToolBlockIndexByID[tc.ItemID] = blockIdx
+		}
+		if tc.ID != "" {
+			state.ToolBlockIndexByID[tc.ID] = blockIdx
+		}
+	}
+	state.OpenToolBlockIndexes[blockIdx] = true
+	state.CurrentToolBlockIndex = blockIdx
+}
+
+func resolveToolBlockIndex(state *ClaudeStreamState, tc *ir.ToolCall, sourceIdx int) int {
+	if state == nil {
+		return 0
+	}
+	ensureToolBlockState(state)
+	if tc != nil {
+		if tc.ItemID != "" {
+			if idx, ok := state.ToolBlockIndexByID[tc.ItemID]; ok {
+				return idx
+			}
+		}
+		if tc.ID != "" {
+			if idx, ok := state.ToolBlockIndexByID[tc.ID]; ok {
+				return idx
+			}
+		}
+	}
+	if idx, ok := state.ToolBlockIndexBySource[sourceIdx]; ok {
+		return idx
+	}
+	return state.CurrentToolBlockIndex
+}
+
+func clearToolBlock(state *ClaudeStreamState, blockIdx int) {
+	if state == nil || blockIdx == 0 {
+		return
+	}
+	ensureToolBlockState(state)
+	delete(state.OpenToolBlockIndexes, blockIdx)
+	delete(state.ToolBlockArgsEmitted, blockIdx)
+	for sourceIdx, idx := range state.ToolBlockIndexBySource {
+		if idx == blockIdx {
+			delete(state.ToolBlockIndexBySource, sourceIdx)
+		}
+	}
+	for key, idx := range state.ToolBlockIndexByID {
+		if idx == blockIdx {
+			delete(state.ToolBlockIndexByID, key)
+		}
+	}
+	if state.CurrentToolBlockIndex == blockIdx {
+		state.CurrentToolBlockIndex = 0
+	}
+}
+
+func emitToolCall(event ir.UnifiedEvent, state *ClaudeStreamState) string {
+	tc := event.ToolCall
+	if tc == nil {
+		return ""
+	}
 	var result strings.Builder
 
 	// Claude API requires an initial content block before tool_use blocks.
@@ -657,12 +761,13 @@ func emitToolCall(tc *ir.ToolCall, state *ClaudeStreamState) string {
 
 	idx := 1
 	if state != nil {
+		ensureToolBlockState(state)
 		state.HasToolCalls = true
 		state.HasContent = true
 		idx = state.NextContentBlockIndex
 		state.NextContentBlockIndex++
 		state.ToolBlockCount++
-		state.CurrentToolBlockIndex = idx
+		registerToolBlock(state, tc, event.ToolCallIndex, idx)
 	}
 
 	result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStart, map[string]interface{}{
@@ -677,18 +782,22 @@ func emitToolCall(tc *ir.ToolCall, state *ClaudeStreamState) string {
 			"type": ir.ClaudeSSEContentBlockDelta, "index": idx,
 			"delta": map[string]interface{}{"type": "input_json_delta", "partial_json": args},
 		}))
+		if state != nil {
+			state.ToolBlockArgsEmitted[idx] = true
+		}
 	}
 
 	return result.String()
 }
 
 // emitToolCallDelta emits input_json_delta for streaming tool call arguments
-func emitToolCallDelta(tc *ir.ToolCall, state *ClaudeStreamState) string {
+func emitToolCallDelta(event ir.UnifiedEvent, state *ClaudeStreamState) string {
+	tc := event.ToolCall
 	if tc == nil || state == nil {
 		return ""
 	}
 
-	idx := state.CurrentToolBlockIndex
+	idx := resolveToolBlockIndex(state, tc, event.ToolCallIndex)
 	if idx == 0 {
 		// No tool block started yet, skip delta
 		return ""
@@ -697,19 +806,20 @@ func emitToolCallDelta(tc *ir.ToolCall, state *ClaudeStreamState) string {
 	var result strings.Builder
 
 	// Emit args delta if present
-	if tc.Args != "" {
+	if tc.Args != "" && !(tc.IsComplete && state.ToolBlockArgsEmitted[idx]) {
 		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockDelta, map[string]interface{}{
 			"type": ir.ClaudeSSEContentBlockDelta, "index": idx,
 			"delta": map[string]interface{}{"type": "input_json_delta", "partial_json": tc.Args},
 		}))
+		state.ToolBlockArgsEmitted[idx] = true
 	}
 
 	// Close the content block if complete
-	if tc.IsComplete {
+	if tc.IsComplete && state.OpenToolBlockIndexes[idx] {
 		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]interface{}{
 			"type": ir.ClaudeSSEContentBlockStop, "index": idx,
 		}))
-		state.CurrentToolBlockIndex = 0
+		clearToolBlock(state, idx)
 	}
 
 	return result.String()
@@ -721,12 +831,22 @@ func emitFinish(usage *ir.Usage, finishReason ir.FinishReason, state *ClaudeStre
 	}
 
 	var result strings.Builder
-	if state != nil && state.CurrentToolBlockIndex > 0 {
-		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]interface{}{
-			"type":  ir.ClaudeSSEContentBlockStop,
-			"index": state.CurrentToolBlockIndex,
-		}))
-		state.CurrentToolBlockIndex = 0
+	if state != nil {
+		ensureToolBlockState(state)
+		if len(state.OpenToolBlockIndexes) > 0 {
+			openIndexes := make([]int, 0, len(state.OpenToolBlockIndexes))
+			for idx := range state.OpenToolBlockIndexes {
+				openIndexes = append(openIndexes, idx)
+			}
+			slices.Sort(openIndexes)
+			for _, idx := range openIndexes {
+				result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]interface{}{
+					"type":  ir.ClaudeSSEContentBlockStop,
+					"index": idx,
+				}))
+				clearToolBlock(state, idx)
+			}
+		}
 	}
 	if state != nil && state.TextBlockStarted && !state.TextBlockStopped {
 		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]interface{}{

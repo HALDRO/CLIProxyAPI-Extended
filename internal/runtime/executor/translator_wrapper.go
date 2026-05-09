@@ -24,6 +24,7 @@ import (
 type UnifiedStreamState struct {
 	// Common
 	ClaudeState         *from_ir.ClaudeStreamState
+	ResponsesState      *from_ir.ResponsesStreamState
 	ReasoningCharsAccum int          // Track accumulated reasoning characters
 	ToolCallSentHeader  map[int]bool // Track if tool call header (ID/Name) has been sent
 	HasContent          bool         // Track if any actual content was output
@@ -53,6 +54,9 @@ func (s *UnifiedStreamState) EnsureInitialized() {
 	}
 	if s.ClaudeState == nil {
 		s.ClaudeState = from_ir.NewClaudeStreamState()
+	}
+	if s.ResponsesState == nil {
+		s.ResponsesState = from_ir.NewResponsesStreamState()
 	}
 }
 
@@ -290,7 +294,9 @@ func TranslateClaudeResponseStream(cfg *config.Config, to sdktranslator.Format, 
 		}
 	case "openai-response":
 		stateResponses := from_ir.NewResponsesStreamState()
-		stateResponses.ResponseID = msgID
+		if stateResponses.ResponseID == "" {
+			stateResponses.ResponseID = msgID
+		}
 		for _, event := range events {
 			responseChunks, err := from_ir.ToResponsesAPIChunk(event, model, stateResponses)
 			if err != nil {
@@ -478,8 +484,14 @@ func convertUnifiedEventsToChunks(events []ir.UnifiedEvent, to sdktranslator.For
 		}
 
 	case "openai-response":
-		responsesState := from_ir.NewResponsesStreamState()
-		responsesState.ResponseID = messageID
+		responsesState := state.ResponsesState
+		if responsesState == nil {
+			responsesState = from_ir.NewResponsesStreamState()
+			state.ResponsesState = responsesState
+		}
+		if responsesState.ResponseID == "" {
+			responsesState.ResponseID = messageID
+		}
 		for _, event := range events {
 			responseChunks, err := from_ir.ToResponsesAPIChunk(event, model, responsesState)
 			if err != nil {
@@ -665,6 +677,15 @@ func TranslateOpenAIResponseNonStream(cfg *config.Config, to sdktranslator.Forma
 	return convertIRToNonStreamResponse(to, messages, usage, model, "chatcmpl-"+model)
 }
 
+// TranslateOllamaResponseNonStream handles Ollama response.
+func TranslateOllamaResponseNonStream(cfg *config.Config, to sdktranslator.Format, resp []byte, model string) ([]byte, error) {
+	messages, usage, err := to_ir.ParseOllamaResponse(resp)
+	if err != nil {
+		return nil, err
+	}
+	return convertIRToNonStreamResponse(to, messages, usage, model, "chatcmpl-"+model)
+}
+
 // convertIRToNonStreamResponse is the common finisher for non-stream responses.
 func convertIRToNonStreamResponse(to sdktranslator.Format, messages []ir.Message, usage *ir.Usage, model, messageID string) ([]byte, error) {
 	switch to.String() {
@@ -698,7 +719,9 @@ func TranslateResponseNonStreamAuto(cfg *config.Config, provider string, to sdkt
 		translated, err = TranslateGeminiResponseNonStream(cfg, to, resp, model)
 	case "claude":
 		translated, err = TranslateClaudeResponseNonStream(cfg, to, resp, model)
-	case "openai", "openai-response", "ollama", "codebuddy", "cursor":
+	case "ollama":
+		translated, err = TranslateOllamaResponseNonStream(cfg, to, resp, model)
+	case "openai", "openai-response", "codebuddy", "cursor":
 		translated, err = TranslateOpenAIResponseNonStream(cfg, to, resp, model)
 	case "codex":
 		messages, usage, err := to_ir.ParseCodexResponse(resp)
@@ -732,7 +755,14 @@ func TranslateResponseStreamAuto(cfg *config.Config, provider string, to sdktran
 		chunks, err = TranslateAntigravityResponseStream(cfg, to, chunk, model, msgID, unifiedState)
 	case "gemini", "aistudio":
 		chunks, err = TranslateGeminiResponseStream(cfg, to, chunk, model, msgID, unifiedState)
-	case "openai", "openai-response", "ollama", "codebuddy", "cursor":
+	case "ollama":
+		events, errOllama := to_ir.ParseOllamaChunk(chunk)
+		if errOllama == nil {
+			chunks, err = convertUnifiedEventsToChunks(events, to, model, msgID, unifiedState)
+		} else {
+			err = errOllama
+		}
+	case "openai", "openai-response", "codebuddy", "cursor":
 		chunks, err = TranslateOpenAIResponseStream(cfg, to, chunk, model, msgID, unifiedState)
 	case "claude":
 		// Claude wrapper still uses specific state type for consistency with parser

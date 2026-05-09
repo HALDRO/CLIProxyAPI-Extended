@@ -302,10 +302,7 @@ func convertMessageToResponsesInputWithContext(msg ir.Message, ctx *toolCallCont
 		// They must be passed via the top-level "instructions" field.
 		return nil
 	case ir.RoleUser:
-		if item := buildResponsesUserMessage(msg); item != nil {
-			return []interface{}{item}
-		}
-		return nil
+		return buildResponsesUserMessageItems(msg, ctx)
 	case ir.RoleAssistant:
 		var items []interface{}
 		for _, part := range msg.Content {
@@ -344,25 +341,90 @@ func convertMessageToResponsesInputWithContext(msg ir.Message, ctx *toolCallCont
 		}
 		return items
 	case ir.RoleTool:
-		// Tool results - each tool result is a separate function_call_output item
-		var items []interface{}
-		for _, part := range msg.Content {
-			if part.Type == ir.ContentTypeToolResult && part.ToolResult != nil {
-				toolCallID := part.ToolResult.ToolCallID
-				if ctx.isCustomToolByContext(toolCallID, ctx.getToolNameByCallID(toolCallID)) {
-					items = append(items, map[string]interface{}{
-						"type": "custom_tool_call_output", "call_id": toolCallID, "output": part.ToolResult.Result,
-					})
-				} else {
-					items = append(items, map[string]interface{}{
-						"type": "function_call_output", "call_id": toolCallID, "output": part.ToolResult.Result,
+		return buildResponsesToolResultItems(msg, ctx)
+	}
+	return nil
+}
+
+func buildResponsesUserMessageItems(msg ir.Message, ctx *toolCallContext) []interface{} {
+	var items []interface{}
+	var content []interface{}
+
+	flushContent := func() {
+		if len(content) == 0 {
+			return
+		}
+		items = append(items, map[string]interface{}{"type": "message", "role": "user", "content": content})
+		content = nil
+	}
+
+	for _, part := range msg.Content {
+		switch part.Type {
+		case ir.ContentTypeText:
+			if part.Text != "" {
+				content = append(content, map[string]interface{}{"type": "input_text", "text": part.Text})
+			}
+		case ir.ContentTypeImage:
+			if part.Image != nil {
+				if part.Image.URL != "" {
+					content = append(content, map[string]interface{}{"type": "input_image", "image_url": part.Image.URL})
+				} else if part.Image.Data != "" {
+					content = append(content, map[string]interface{}{
+						"type": "input_image", "image_url": fmt.Sprintf("data:%s;base64,%s", part.Image.MimeType, part.Image.Data),
 					})
 				}
 			}
+		case ir.ContentTypeFile:
+			if part.File != nil {
+				fileItem := map[string]interface{}{"type": "input_file"}
+				if part.File.FileID != "" {
+					fileItem["file_id"] = part.File.FileID
+				}
+				if part.File.FileURL != "" {
+					fileItem["file_url"] = part.File.FileURL
+				}
+				if part.File.Filename != "" {
+					fileItem["filename"] = part.File.Filename
+				}
+				if part.File.FileData != "" {
+					fileItem["file_data"] = part.File.FileData
+				}
+				content = append(content, fileItem)
+			}
+		case ir.ContentTypeToolResult:
+			if part.ToolResult == nil {
+				continue
+			}
+			flushContent()
+			items = append(items, buildResponsesToolOutputItem(part.ToolResult, ctx))
 		}
-		return items
 	}
-	return nil
+
+	flushContent()
+	return items
+}
+
+func buildResponsesToolResultItems(msg ir.Message, ctx *toolCallContext) []interface{} {
+	var items []interface{}
+	for _, part := range msg.Content {
+		if part.Type != ir.ContentTypeToolResult || part.ToolResult == nil {
+			continue
+		}
+		items = append(items, buildResponsesToolOutputItem(part.ToolResult, ctx))
+	}
+	return items
+}
+
+func buildResponsesToolOutputItem(toolResult *ir.ToolResultPart, ctx *toolCallContext) map[string]interface{} {
+	toolCallID := toolResult.ToolCallID
+	if ctx.isCustomToolByContext(toolCallID, ctx.getToolNameByCallID(toolCallID)) {
+		return map[string]interface{}{
+			"type": "custom_tool_call_output", "call_id": toolCallID, "output": toolResult.Result,
+		}
+	}
+	return map[string]interface{}{
+		"type": "function_call_output", "call_id": toolCallID, "output": toolResult.Result,
+	}
 }
 
 func looksLikeCodexEncryptedReasoning(signature string) bool {
@@ -1268,14 +1330,20 @@ func handleFinishEvent(event ir.UnifiedEvent, state *ResponsesStreamState, nextS
 	}
 
 	usageMap := buildUsageMapForResponses(event.Usage)
+	responseEventType := "response.completed"
+	responseStatus := "completed"
+	if event.FinishReason != ir.FinishReasonStop && event.FinishReason != ir.FinishReasonToolCalls {
+		responseEventType = "response.incomplete"
+		responseStatus = "incomplete"
+	}
 	b, _ := json.Marshal(map[string]interface{}{
-		"type": "response.completed", "sequence_number": nextSeq(),
+		"type": responseEventType, "sequence_number": nextSeq(),
 		"response": map[string]interface{}{
-			"id": state.ResponseID, "object": "response", "created_at": state.Created, "status": "completed",
+			"id": state.ResponseID, "object": "response", "created_at": state.Created, "status": responseStatus,
 			"usage": usageMap,
 		},
 	})
-	out = append(out, fmt.Sprintf("event: response.completed\ndata: %s\n\n", string(b)))
+	out = append(out, fmt.Sprintf("event: %s\ndata: %s\n\n", responseEventType, string(b)))
 	return out
 }
 

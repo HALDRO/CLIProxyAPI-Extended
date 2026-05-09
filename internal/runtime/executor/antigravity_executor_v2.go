@@ -258,7 +258,8 @@ func (e *AntigravityExecutorV2) Execute(ctx context.Context, auth *cliproxyauth.
 	// Apply YAML payload rules under protocol "antigravity".
 	// Historically, Antigravity rules target the inner request body.
 	requestedModel := payloadRequestedModel(opts, req.Model)
-	body = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", body, opts.OriginalRequest, requestedModel)
+	requestPath := payloadRequestPath(opts)
+	body = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", body, opts.OriginalRequest, requestedModel, requestPath)
 
 	// Apply thinking configuration (handles budget/level normalization and model capabilities)
 	body, err = thinking.ApplyThinking(body, req.Model, opts.SourceFormat.String(), "antigravity", e.Identifier())
@@ -484,7 +485,8 @@ func (e *AntigravityExecutorV2) ExecuteStream(ctx context.Context, auth *cliprox
 		return nil, err
 	}
 	requestedModel := payloadRequestedModel(opts, req.Model)
-	body = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", body, opts.OriginalRequest, requestedModel)
+	requestPath := payloadRequestPath(opts)
+	body = applyPayloadConfigWithRoot(e.cfg, baseModel, "antigravity", "request", body, opts.OriginalRequest, requestedModel, requestPath)
 
 	// Apply thinking configuration (handles budget/level normalization and model capabilities)
 	body, err = thinking.ApplyThinking(body, req.Model, opts.SourceFormat.String(), "antigravity", e.Identifier())
@@ -621,13 +623,19 @@ attemptLoop:
 				if errPeek != nil {
 					recordAPIResponseError(ctx, e.cfg, errPeek)
 					reporter.publishFailure(ctx)
-					out <- cliproxyexecutor.StreamChunk{Err: errPeek}
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Err: errPeek}:
+					case <-ctx.Done():
+					}
 					return
 				}
 				if len(firstLine) == 0 {
 					recordAPIResponseError(ctx, e.cfg, fmt.Errorf("empty first stream chunk"))
 					reporter.publishFailure(ctx)
-					out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("empty first stream chunk")}
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("empty first stream chunk")}:
+					case <-ctx.Done():
+					}
 					return
 				}
 
@@ -658,11 +666,18 @@ attemptLoop:
 
 					chunks, errConv := TranslateAntigravityResponseStream(e.cfg, opts.SourceFormat, payload, req.Model, messageID, state)
 					if errConv != nil {
-						out <- cliproxyexecutor.StreamChunk{Err: errConv}
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Err: errConv}:
+						case <-ctx.Done():
+						}
 						return
 					}
 					for i := range chunks {
-						out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+						case <-ctx.Done():
+							return
+						}
 					}
 				}
 
@@ -670,14 +685,21 @@ attemptLoop:
 				tail, errTail := TranslateAntigravityResponseStream(e.cfg, opts.SourceFormat, []byte("[DONE]"), req.Model, messageID, state)
 				if errTail == nil {
 					for i := range tail {
-						out <- cliproxyexecutor.StreamChunk{Payload: tail[i]}
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Payload: tail[i]}:
+						case <-ctx.Done():
+							return
+						}
 					}
 				}
 
 				if errScan := scanner.Err(); errScan != nil {
 					recordAPIResponseError(ctx, e.cfg, errScan)
 					reporter.publishFailure(ctx)
-					out <- cliproxyexecutor.StreamChunk{Err: errScan}
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
+					case <-ctx.Done():
+					}
 					return
 				}
 				reporter.ensurePublished(ctx)
