@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	kiroclaude "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/claude"
 	kirocommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/common"
 	kiroopenai "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/openai"
@@ -1664,6 +1665,10 @@ func getEffectiveProfileArnWithWarning(auth *cliproxyauth.Auth, profileArn strin
 // Supports both Kiro and Amazon Q prefixes since they use the same API.
 // Agentic variants (-agentic suffix) map to the same backend model IDs.
 func (e *KiroExecutor) mapModelToKiro(model string) string {
+	if info := registry.NormalizeKiroRoute(model); info.UpstreamID != "" {
+		return info.UpstreamID
+	}
+
 	modelMap := map[string]string{
 		// Amazon Q format (amazonq- prefix) - same API as Kiro
 		"amazonq-auto":                       "auto",

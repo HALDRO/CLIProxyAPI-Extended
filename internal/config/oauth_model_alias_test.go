@@ -68,37 +68,8 @@ func TestSanitizeOAuthModelAlias_InjectsDefaultKiroAliases(t *testing.T) {
 	cfg.SanitizeOAuthModelAlias()
 
 	kiroAliases := cfg.OAuthModelAlias["kiro"]
-	if len(kiroAliases) == 0 {
-		t.Fatal("expected default kiro aliases to be injected")
-	}
-
-	// Check that standard Claude model names are present
-	aliasSet := make(map[string]bool)
-	for _, a := range kiroAliases {
-		aliasSet[a.Alias] = true
-	}
-	expectedAliases := []string{
-		"claude-sonnet-4-5-20250929",
-		"claude-sonnet-4-5",
-		"claude-sonnet-4-20250514",
-		"claude-sonnet-4",
-		"claude-opus-4-6",
-		"claude-opus-4-5-20251101",
-		"claude-opus-4-5",
-		"claude-haiku-4-5-20251001",
-		"claude-haiku-4-5",
-	}
-	for _, expected := range expectedAliases {
-		if !aliasSet[expected] {
-			t.Fatalf("expected default kiro alias %q to be present", expected)
-		}
-	}
-
-	// All should have fork=true
-	for _, a := range kiroAliases {
-		if !a.Fork {
-			t.Fatalf("expected all default kiro aliases to have fork=true, got fork=false for %q", a.Alias)
-		}
+	if len(kiroAliases) != 0 {
+		t.Fatalf("expected no default public kiro aliases, got %d", len(kiroAliases))
 	}
 
 	// Codex aliases should still be preserved
@@ -249,13 +220,14 @@ func TestSanitizeOAuthModelAlias_DoesNotReinjectAfterExplicitDeletionEmpty(t *te
 }
 
 func TestSanitizeOAuthModelAlias_InjectsDefaultKiroWhenEmpty(t *testing.T) {
-	// When OAuthModelAlias is nil, kiro defaults should still be injected
+	// When OAuthModelAlias is nil, bare public Kiro IDs are primary and no default
+	// public kiro aliases should be injected.
 	cfg := &Config{}
 
 	cfg.SanitizeOAuthModelAlias()
 
 	kiroAliases := cfg.OAuthModelAlias["kiro"]
-	if len(kiroAliases) == 0 {
-		t.Fatal("expected default kiro aliases to be injected when OAuthModelAlias is nil")
+	if len(kiroAliases) != 0 {
+		t.Fatalf("expected no default kiro aliases when OAuthModelAlias is nil, got %d", len(kiroAliases))
 	}
 }

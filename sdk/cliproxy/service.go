@@ -1713,9 +1713,10 @@ func convertKiroAPIModels(apiModels []*kiroauth.KiroModel) []*ModelInfo {
 			continue
 		}
 
-		// Create model ID with kiro- prefix
-		modelID := "kiro-" + normalizeKiroModelID(m.ModelID)
-		if modelID == "kiro-" {
+		// Public Kiro surface uses bare IDs; backward-compatible prefixed inputs are
+		// handled later by the shared Kiro route normalizer.
+		modelID := normalizeKiroModelID(m.ModelID)
+		if modelID == "" {
 			continue
 		}
 		if _, exists := seen[modelID]; exists {

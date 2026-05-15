@@ -896,6 +896,11 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 
 	normalizedBaseModel, providerID := registry.ParseProviderPrefixedModelID(baseModel)
 	if providerID != "" {
+		// Strip redundant provider prefix (e.g. "kiro-claude-sonnet-4-5" → "claude-sonnet-4-5").
+		prefix := strings.ToLower(providerID) + "-"
+		if strings.HasPrefix(strings.ToLower(normalizedBaseModel), prefix) {
+			normalizedBaseModel = normalizedBaseModel[len(prefix):]
+		}
 		return []string{providerID}, restoreSuffix(normalizedBaseModel, parsed), nil
 	}
 

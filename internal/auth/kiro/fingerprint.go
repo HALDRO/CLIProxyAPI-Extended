@@ -9,11 +9,14 @@ import (
 	"net/http"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+const normalizedMachineIDLength = 64
 
 // Fingerprint holds multi-dimensional fingerprint data for runtime request disguise.
 type Fingerprint struct {
@@ -230,6 +233,15 @@ func GetAccountKey(clientID, refreshToken string) string {
 
 // BuildUserAgent format: aws-sdk-js/{SDKVersion} ua/2.1 os/{OSType}#{OSVersion} lang/js md/nodejs#{NodeVersion} api/codewhispererstreaming#{SDKVersion} m/E KiroIDE-{KiroVersion}-{KiroHash}
 func (fp *Fingerprint) BuildUserAgent() string {
+	return fp.BuildUserAgentWithMachineID(fp.KiroHash)
+}
+
+// BuildUserAgentWithMachineID formats the runtime user-agent using the provided machine ID.
+// If machineID is empty, the fingerprint's own KiroHash is used.
+func (fp *Fingerprint) BuildUserAgentWithMachineID(machineID string) string {
+	if machineID == "" {
+		machineID = fp.KiroHash
+	}
 	return fmt.Sprintf(
 		"aws-sdk-js/%s ua/2.1 os/%s#%s lang/js md/nodejs#%s api/codewhispererstreaming#%s m/E KiroIDE-%s-%s",
 		fp.StreamingSDKVersion,
@@ -238,18 +250,58 @@ func (fp *Fingerprint) BuildUserAgent() string {
 		fp.NodeVersion,
 		fp.StreamingSDKVersion,
 		fp.KiroVersion,
-		fp.KiroHash,
+		machineID,
 	)
 }
 
 // BuildAmzUserAgent format: aws-sdk-js/{SDKVersion} KiroIDE-{KiroVersion}-{KiroHash}
 func (fp *Fingerprint) BuildAmzUserAgent() string {
+	return fp.BuildAmzUserAgentWithMachineID(fp.KiroHash)
+}
+
+// BuildAmzUserAgentWithMachineID formats the x-amz-user-agent using the provided machine ID.
+// If machineID is empty, the fingerprint's own KiroHash is used.
+func (fp *Fingerprint) BuildAmzUserAgentWithMachineID(machineID string) string {
+	if machineID == "" {
+		machineID = fp.KiroHash
+	}
 	return fmt.Sprintf(
 		"aws-sdk-js/%s KiroIDE-%s-%s",
 		fp.StreamingSDKVersion,
 		fp.KiroVersion,
-		fp.KiroHash,
+		machineID,
 	)
+}
+
+// NormalizeMachineID returns a canonical 64-char hex machine ID.
+// It accepts either an existing 64-char hex string or a UUID-like 32-char hex value
+// (with or without dashes), which is doubled to 64 chars to match Kiro's expected shape.
+func NormalizeMachineID(machineID string) (string, bool) {
+	trimmed := strings.TrimSpace(machineID)
+	if trimmed == "" {
+		return "", false
+	}
+
+	if len(trimmed) == normalizedMachineIDLength && isASCIIHex(trimmed) {
+		return strings.ToLower(trimmed), true
+	}
+
+	withoutDashes := strings.ReplaceAll(trimmed, "-", "")
+	if len(withoutDashes) == 32 && isASCIIHex(withoutDashes) {
+		normalized := strings.ToLower(withoutDashes)
+		return normalized + normalized, true
+	}
+
+	return "", false
+}
+
+func isASCIIHex(value string) bool {
+	for _, ch := range value {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') && (ch < 'A' || ch > 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 func SetOIDCHeaders(req *http.Request) {

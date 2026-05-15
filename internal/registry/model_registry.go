@@ -842,6 +842,12 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 		}
 
 		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
+			if registration.Info != nil && registration.Info.Type == "kiro" {
+				baseID := strings.TrimSpace(registration.Info.ID)
+				if strings.HasPrefix(baseID, "kiro-") || strings.HasPrefix(baseID, "amazonq-") {
+					continue
+				}
+			}
 			if r.showProviderPrefixes && registration.Providers != nil && len(registration.Providers) > 0 {
 				for provider := range registration.Providers {
 					modelInfoCopy := cloneModelInfo(registration.Info)

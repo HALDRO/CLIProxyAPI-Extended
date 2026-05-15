@@ -29,7 +29,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	kiroclaude "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/from_ir"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/ir"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator_new/to_ir"
@@ -74,6 +73,7 @@ const (
 var kiroModelMapping = map[string]string{
 	// Amazon Q format (amazonq- prefix) - same API as Kiro
 	"amazonq-auto":                       "auto",
+	"amazonq-claude-opus-4-7":            "claude-opus-4.7",
 	"amazonq-claude-opus-4-6":            "claude-opus-4.6",
 	"amazonq-claude-opus-4-5":            "claude-opus-4.5",
 	"amazonq-claude-sonnet-4-5":          "claude-sonnet-4.5",
@@ -82,6 +82,7 @@ var kiroModelMapping = map[string]string{
 	"amazonq-claude-sonnet-4-20250514":   "claude-sonnet-4",
 	"amazonq-claude-haiku-4-5":           "claude-haiku-4.5",
 	// Kiro format (kiro- prefix) - valid model names that should be preserved
+	"kiro-claude-opus-4-7":            "claude-opus-4.7",
 	"kiro-claude-opus-4-6":            "claude-opus-4.6",
 	"kiro-claude-opus-4-5":            "claude-opus-4.5",
 	"kiro-claude-sonnet-4-5":          "claude-sonnet-4.5",
@@ -91,6 +92,8 @@ var kiroModelMapping = map[string]string{
 	"kiro-claude-haiku-4-5":           "claude-haiku-4.5",
 	"kiro-auto":                       "auto",
 	// Native format (no prefix) - used by Kiro IDE directly
+	"claude-opus-4-7":            "claude-opus-4.7",
+	"claude-opus-4.7":            "claude-opus-4.7",
 	"claude-opus-4-6":            "claude-opus-4.6",
 	"claude-opus-4.6":            "claude-opus-4.6",
 	"claude-opus-4-5":            "claude-opus-4.5",
@@ -104,11 +107,13 @@ var kiroModelMapping = map[string]string{
 	"claude-sonnet-4-20250514":   "claude-sonnet-4",
 	"auto":                       "auto",
 	// Agentic variants (same backend model IDs, but with special system prompt)
+	"claude-opus-4.7-agentic":        "claude-opus-4.7",
 	"claude-opus-4.6-agentic":        "claude-opus-4.6",
 	"claude-opus-4.5-agentic":        "claude-opus-4.5",
 	"claude-sonnet-4.5-agentic":      "claude-sonnet-4.5",
 	"claude-sonnet-4-agentic":        "claude-sonnet-4",
 	"claude-haiku-4.5-agentic":       "claude-haiku-4.5",
+	"kiro-claude-opus-4-7-agentic":   "claude-opus-4.7",
 	"kiro-claude-opus-4-6-agentic":   "claude-opus-4.6",
 	"kiro-claude-opus-4-5-agentic":   "claude-opus-4.5",
 	"kiro-claude-sonnet-4-5-agentic": "claude-sonnet-4.5",
@@ -268,9 +273,10 @@ func getAccountKeyV2(auth *coreauth.Auth) string {
 func applyDynamicFingerprintV2(req *http.Request, auth *coreauth.Auth) {
 	accountKey := getAccountKeyV2(auth)
 	fp := kiroauth.GlobalFingerprintManager().GetFingerprint(accountKey)
+	machineID := resolveKiroMachineIDV2(auth, fp)
 
-	req.Header.Set("User-Agent", fp.BuildUserAgent())
-	req.Header.Set("X-Amz-User-Agent", fp.BuildAmzUserAgent())
+	req.Header.Set("User-Agent", fp.BuildUserAgentWithMachineID(machineID))
+	req.Header.Set("X-Amz-User-Agent", fp.BuildAmzUserAgentWithMachineID(machineID))
 	req.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentModeV2)
 	req.Header.Set("x-amzn-codewhisperer-optout", "true")
 
@@ -280,6 +286,32 @@ func applyDynamicFingerprintV2(req *http.Request, auth *coreauth.Auth) {
 	}
 	log.Debugf("kiro-v2: using dynamic fingerprint for account %s... (SDK:%s, OS:%s/%s, Kiro:%s)",
 		keyPrefix, fp.StreamingSDKVersion, fp.OSType, fp.OSVersion, fp.KiroVersion)
+}
+
+func resolveKiroMachineIDV2(auth *coreauth.Auth, fp *kiroauth.Fingerprint) string {
+	if auth != nil {
+		if machineID := getNormalizedMachineIDFromAuthV2(auth); machineID != "" {
+			return machineID
+		}
+	}
+	if fp != nil {
+		return fp.KiroHash
+	}
+	return ""
+}
+
+func getNormalizedMachineIDFromAuthV2(auth *coreauth.Auth) string {
+	if auth == nil || auth.Metadata == nil {
+		return ""
+	}
+	for _, key := range []string{"machine_id", "machineId"} {
+		if machineID, ok := auth.Metadata[key].(string); ok {
+			if normalized, ok := kiroauth.NormalizeMachineID(machineID); ok {
+				return normalized
+			}
+		}
+	}
+	return ""
 }
 
 type KiroExecutorV2 struct {
@@ -386,13 +418,15 @@ func isJWTExpired(token string) bool {
 	return time.Now().After(expTime) || time.Until(expTime) < time.Minute
 }
 
-// determineOrigin returns the origin based on model type.
-// Opus models use AI_EDITOR (Kiro IDE quota), others use CLI (Amazon Q quota).
+// determineOrigin returns the origin based on model family/channel.
+// Kiro-native Claude models use AI_EDITOR quota like the working kiro.rs path,
+// while explicit Amazon Q aliases continue to use CLI quota.
 func (e *KiroExecutorV2) determineOrigin(model string) string {
-	if strings.Contains(strings.ToLower(model), "opus") {
-		return "AI_EDITOR"
+	info := registry.NormalizeKiroRoute(model)
+	if info.Origin != "" {
+		return info.Origin
 	}
-	return "CLI"
+	return "AI_EDITOR"
 }
 
 func (e *KiroExecutorV2) ensureValidToken(ctx context.Context, auth *coreauth.Auth) (string, *coreauth.Auth, error) {
@@ -671,7 +705,7 @@ func (e *KiroExecutorV2) buildHTTPRequest(rc *requestContext) (*http.Request, er
 
 func (e *KiroExecutorV2) Execute(ctx context.Context, auth *coreauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	// Check for pure web_search request — route to MCP endpoint
-	if kiroclaude.HasWebSearchTool(req.Payload) {
+	if hasWebSearchToolV2(req.Payload) {
 		log.Infof("kiro-v2: detected pure web_search request (non-stream), routing to MCP endpoint")
 		return e.handleWebSearchV2(ctx, auth, req, opts)
 	}
@@ -803,14 +837,14 @@ func (e *KiroExecutorV2) executeWithRetry(rc *requestContext) (cliproxyexecutor.
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			log.Warnf("kiro-v2: non-200 details model=%s origin=%s fallback=%v apiRegion=%s bodyLen=%d contentType=%s",
+				rc.req.Model, currentOrigin, useFallbackURL, rc.apiRegion, len(body), resp.Header.Get("Content-Type"))
 			log.Warnf("kiro-v2: upstream error %d for model %s: %s", resp.StatusCode, rc.req.Model, string(body))
 			return cliproxyexecutor.Response{}, fmt.Errorf("upstream error %d: %s", resp.StatusCode, string(body))
 		}
 
 		// Success — mark token as successful
 		rateLimiter.MarkTokenSuccess(rc.tokenKey)
-
-		defer resp.Body.Close()
 		if strings.HasPrefix(resp.Header.Get("Content-Type"), "application/vnd.amazon.eventstream") {
 			return e.handleEventStreamResponse(resp.Body, rc.req.Model, rc.sourceFormat)
 		}
@@ -824,13 +858,19 @@ func (e *KiroExecutorV2) executeWithRetry(rc *requestContext) (cliproxyexecutor.
 }
 
 func (e *KiroExecutorV2) handleEventStreamResponse(body io.ReadCloser, model string, sourceFormat string) (cliproxyexecutor.Response, error) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("kiro-v2: panic in handleEventStreamResponse model=%s format=%s: %v", model, sourceFormat, r)
+		}
+	}()
 	defer body.Close()
+	log.Infof("kiro-v2: handleEventStreamResponse start model=%s format=%s", model, sourceFormat)
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(nil, 52_428_800) // 50MB buffer to handle large AWS EventStream frames
 	scanner.Split(splitAWSEventStream)
 	state := to_ir.NewKiroStreamState()
 	// Use model registry context length when available (fallback remains 200k)
-	if info := registry.LookupModelInfo("kiro-"+strings.ReplaceAll(model, ".", "-"), "kiro"); info != nil && info.ContextLength > 0 {
+	if info := registry.LookupModelInfo(registry.PublicKiroModelID(model), "kiro"); info != nil && info.ContextLength > 0 {
 		state.SetContextWindowTokens(info.ContextLength)
 	}
 	for scanner.Scan() {
@@ -868,6 +908,7 @@ func (e *KiroExecutorV2) handleEventStreamResponse(body io.ReadCloser, model str
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
+	log.Infof("kiro-v2: handleEventStreamResponse done model=%s format=%s payloadLen=%d", model, sourceFormat, len(converted))
 	return cliproxyexecutor.Response{Payload: converted}, nil
 }
 
@@ -894,14 +935,23 @@ func shouldFinalizeKiroStreamAfterError(state *to_ir.KiroStreamState) bool {
 }
 
 func (e *KiroExecutorV2) handleJSONResponse(body io.ReadCloser, model string, sourceFormat string) (cliproxyexecutor.Response, error) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("kiro-v2: panic in handleJSONResponse model=%s format=%s: %v", model, sourceFormat, r)
+		}
+	}()
+	defer body.Close()
+	log.Infof("kiro-v2: handleJSONResponse start model=%s format=%s", model, sourceFormat)
 	rawData, err := io.ReadAll(body)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
+	log.Infof("kiro-v2: handleJSONResponse rawLen=%d model=%s format=%s", len(rawData), model, sourceFormat)
 
 	messages, usage, err := to_ir.ParseKiroResponse(rawData)
 	if err != nil {
-		return cliproxyexecutor.Response{}, err
+		log.Warnf("kiro-v2: handleJSONResponse parse failed for model=%s format=%s, trying eventstream fallback: %v", model, sourceFormat, err)
+		return e.handleEventStreamResponse(io.NopCloser(bytes.NewReader(rawData)), model, sourceFormat)
 	}
 
 	messageID := "chatcmpl-" + uuid.New().String()
@@ -909,6 +959,7 @@ func (e *KiroExecutorV2) handleJSONResponse(body io.ReadCloser, model string, so
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
+	log.Infof("kiro-v2: handleJSONResponse done model=%s format=%s payloadLen=%d", model, sourceFormat, len(converted))
 	return cliproxyexecutor.Response{Payload: converted}, nil
 }
 
@@ -925,7 +976,7 @@ func (e *KiroExecutorV2) convertToSourceFormat(messages []ir.Message, usage *ir.
 
 func (e *KiroExecutorV2) ExecuteStream(ctx context.Context, auth *coreauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	// Check for pure web_search request — route to MCP endpoint
-	if kiroclaude.HasWebSearchTool(req.Payload) {
+	if hasWebSearchToolV2(req.Payload) {
 		log.Infof("kiro-v2: detected pure web_search request, routing to MCP endpoint")
 		return e.handleWebSearchStreamV2(ctx, auth, req, opts)
 	}
@@ -1056,6 +1107,8 @@ func (e *KiroExecutorV2) executeStreamWithRetry(rc *requestContext) (*cliproxyex
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			log.Warnf("kiro-v2: stream non-200 details model=%s origin=%s fallback=%v apiRegion=%s bodyLen=%d contentType=%s",
+				rc.req.Model, currentOrigin, useFallbackURL, rc.apiRegion, len(body), resp.Header.Get("Content-Type"))
 			log.Warnf("kiro-v2: stream upstream error %d for model %s: %s", resp.StatusCode, rc.req.Model, string(body))
 			return nil, fmt.Errorf("upstream error %d: %s", resp.StatusCode, string(body))
 		}
@@ -1385,21 +1438,48 @@ func parseTokenExpiry(meta map[string]interface{}) time.Time {
 }
 
 func mapModelID(model string) string {
-	// Strip -agentic suffix for API call (it's only used for system prompt injection)
-	baseModel := strings.TrimSuffix(model, "-agentic")
-
-	// Check explicit mapping (mainly for amazonq- prefix)
-	if mapped, ok := kiroModelMapping[baseModel]; ok {
-		return mapped
+	info := registry.NormalizeKiroRoute(model)
+	if info.UpstreamID != "" {
+		return info.UpstreamID
 	}
+	return strings.TrimSuffix(model, "-agentic")
+}
 
-	// Strip amazonq- prefix if present (fallback)
-	if strings.HasPrefix(baseModel, "amazonq-") {
-		return strings.TrimPrefix(baseModel, "amazonq-")
+func legacyKiroModelMapping(model string) (string, bool) {
+	switch model {
+	case "amazonq-auto", "kiro-auto":
+		return "auto", true
+	case "amazonq-claude-opus-4-6", "kiro-claude-opus-4-6":
+		return "claude-opus-4.6", true
+	case "amazonq-claude-sonnet-4-6", "kiro-claude-sonnet-4-6":
+		return "claude-sonnet-4.6", true
+	case "amazonq-claude-opus-4-5", "kiro-claude-opus-4-5":
+		return "claude-opus-4.5", true
+	case "amazonq-claude-sonnet-4-5", "amazonq-claude-sonnet-4-5-20250929", "kiro-claude-sonnet-4-5", "kiro-claude-sonnet-4-5-20250929":
+		return "claude-sonnet-4.5", true
+	case "amazonq-claude-sonnet-4", "amazonq-claude-sonnet-4-20250514", "kiro-claude-sonnet-4", "kiro-claude-sonnet-4-20250514":
+		return "claude-sonnet-4", true
+	case "amazonq-claude-haiku-4-5", "kiro-claude-haiku-4-5":
+		return "claude-haiku-4.5", true
+	case "kiro-claude-opus-4-6-agentic", "kiro-claude-sonnet-4-6-agentic":
+		return strings.ReplaceAll(strings.TrimPrefix(strings.TrimSuffix(model, "-agentic"), "kiro-"), "-4-6", "-4.6"), true
+	case "kiro-claude-opus-4-5-agentic", "kiro-claude-sonnet-4-5-agentic":
+		return strings.ReplaceAll(strings.TrimPrefix(strings.TrimSuffix(model, "-agentic"), "kiro-"), "-4-5", "-4.5"), true
+	case "kiro-claude-sonnet-4-agentic":
+		return "claude-sonnet-4", true
+	case "kiro-claude-haiku-4-5-agentic":
+		return "claude-haiku-4.5", true
+	case "amazonq-claude-opus-4-6-agentic", "amazonq-claude-sonnet-4-6-agentic":
+		return strings.ReplaceAll(strings.TrimPrefix(strings.TrimSuffix(model, "-agentic"), "amazonq-"), "-4-6", "-4.6"), true
+	case "amazonq-claude-opus-4-5-agentic", "amazonq-claude-sonnet-4-5-agentic":
+		return strings.ReplaceAll(strings.TrimPrefix(strings.TrimSuffix(model, "-agentic"), "amazonq-"), "-4-5", "-4.5"), true
+	case "amazonq-claude-sonnet-4-agentic":
+		return "claude-sonnet-4", true
+	case "amazonq-claude-haiku-4-5-agentic":
+		return "claude-haiku-4.5", true
+	default:
+		return "", false
 	}
-
-	// Return as-is (native Kiro format: auto, claude-opus-4.5, etc.)
-	return baseModel
 }
 
 func splitAWSEventStream(data []byte, atEOF bool) (int, []byte, error) {
@@ -1447,14 +1527,15 @@ func (e *KiroExecutorV2) handleWebSearchV2(
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 ) (cliproxyexecutor.Response, error) {
-	query := kiroclaude.ExtractSearchQuery(req.Payload)
+	sourceFormat := opts.SourceFormat.String()
+	query := extractSearchQueryV2(req.Payload)
 	if query == "" {
 		log.Warnf("kiro-v2/websearch: failed to extract search query, falling back to normal Execute")
 		return e.Execute(ctx, auth, withoutWebSearchV2(req), opts)
 	}
 
 	region := e.getAPIRegionV2(auth)
-	mcpEndpoint := fmt.Sprintf("https://q.%s.amazonaws.com/mcp", region)
+	mcpEndpoint := buildMcpEndpointV2(region)
 
 	token, updatedAuth, err := e.ensureValidToken(ctx, auth)
 	if err != nil {
@@ -1464,19 +1545,18 @@ func (e *KiroExecutorV2) handleWebSearchV2(
 		auth = updatedAuth
 	}
 
-	fp, authAttrs := e.getMCPAuthContextV2(auth, token)
+	machineID, authAttrs := e.getMCPAuthContextV2(auth, token)
 	httpClient := e.newMCPHTTPClientV2(ctx, auth)
-	kiroclaude.FetchToolDescription(mcpEndpoint, token, httpClient, fp, authAttrs)
 
-	_, mcpRequest := kiroclaude.CreateMcpRequest(query)
-	handler := kiroclaude.NewWebSearchHandler(mcpEndpoint, token, httpClient, fp, authAttrs)
-	mcpResponse, mcpErr := handler.CallMcpAPI(mcpRequest)
+	_, mcpRequest := createMcpRequestV2(query)
+	handler := newWebSearchHandlerV2(mcpEndpoint, token, httpClient, machineID, authAttrs)
+	mcpResponse, mcpErr := handler.callMcpAPI(mcpRequest)
 
-	var searchResults *kiroclaude.WebSearchResults
+	var searchResults *kiroWebSearchResultsV2
 	if mcpErr != nil {
 		log.Warnf("kiro-v2/websearch: MCP API call failed: %v, continuing with empty results", mcpErr)
 	} else {
-		searchResults = kiroclaude.ParseSearchResults(mcpResponse)
+		searchResults = parseSearchResultsV2(mcpResponse)
 	}
 
 	resultCount := 0
@@ -1485,27 +1565,32 @@ func (e *KiroExecutorV2) handleWebSearchV2(
 	}
 	log.Infof("kiro-v2/websearch: non-stream: got %d results for query: %s", resultCount, query)
 
-	toolUseID := fmt.Sprintf("srvtoolu_%s", kiroclaude.GenerateToolUseID())
-	modifiedPayload, err := kiroclaude.InjectToolResultsClaude(bytes.Clone(req.Payload), toolUseID, query, searchResults)
+	toolUseID := fmt.Sprintf("srvtoolu_%s", generateToolUseIDV2())
+	modifiedPayload, err := injectToolResultsV2(bytes.Clone(req.Payload), toolUseID, query, searchResults, sourceFormat)
 	if err != nil {
 		log.Warnf("kiro-v2/websearch: failed to inject tool results: %v, falling back", err)
 		return e.Execute(ctx, auth, withoutWebSearchV2(req), opts)
 	}
 
-	modifiedPayload, _ = kiroclaude.StripWebSearchTool(modifiedPayload)
+	modifiedPayload, _ = stripWebSearchToolV2(modifiedPayload)
 	modifiedReq := req
 	modifiedReq.Payload = modifiedPayload
 	resp, err := e.Execute(ctx, auth, modifiedReq, opts)
 	if err != nil {
 		return resp, err
 	}
+	if sourceFormat != "claude" {
+		analysis := analyzeOpenAIWebSearchResponseV2(resp.Payload)
+		log.Infof("kiro-v2/websearch: openai non-stream stop=%s followup_search=%v query=%s", analysis.StopReason, analysis.HasWebSearchToolUse, analysis.WebSearchQuery)
+		return resp, nil
+	}
 
-	indicators := []kiroclaude.SearchIndicator{{
+	indicators := []kiroSearchIndicatorV2{{
 		ToolUseID: toolUseID,
 		Query:     query,
 		Results:   searchResults,
 	}}
-	if injected, injErr := kiroclaude.InjectSearchIndicatorsInResponse(resp.Payload, indicators); injErr == nil {
+	if injected, injErr := injectSearchIndicatorsInResponseV2(resp.Payload, indicators); injErr == nil {
 		resp.Payload = injected
 	} else {
 		log.Warnf("kiro-v2/websearch: failed to inject search indicators: %v", injErr)
@@ -1522,14 +1607,15 @@ func (e *KiroExecutorV2) handleWebSearchStreamV2(
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 ) (*cliproxyexecutor.StreamResult, error) {
-	query := kiroclaude.ExtractSearchQuery(req.Payload)
+	sourceFormat := opts.SourceFormat.String()
+	query := extractSearchQueryV2(req.Payload)
 	if query == "" {
 		log.Warnf("kiro-v2/websearch: failed to extract search query, falling back to normal stream")
 		return e.ExecuteStream(ctx, auth, withoutWebSearchV2(req), opts)
 	}
 
 	region := e.getAPIRegionV2(auth)
-	mcpEndpoint := fmt.Sprintf("https://q.%s.amazonaws.com/mcp", region)
+	mcpEndpoint := buildMcpEndpointV2(region)
 
 	token, updatedAuth, err := e.ensureValidToken(ctx, auth)
 	if err != nil {
@@ -1539,21 +1625,61 @@ func (e *KiroExecutorV2) handleWebSearchStreamV2(
 		auth = updatedAuth
 	}
 
-	fp, authAttrs := e.getMCPAuthContextV2(auth, token)
+	if sourceFormat != "claude" {
+		modifiedPayload, injectErr := injectToolResultsV2(bytes.Clone(req.Payload), fmt.Sprintf("srvtoolu_%s", generateToolUseIDV2()), query, nil, sourceFormat)
+		if injectErr != nil {
+			log.Warnf("kiro-v2/websearch: openai-path inject failed: %v", injectErr)
+			return e.ExecuteStream(ctx, auth, withoutWebSearchV2(req), opts)
+		}
+		modifiedPayload, _ = stripWebSearchToolV2(modifiedPayload)
+		modifiedReq := req
+		modifiedReq.Payload = modifiedPayload
+		stream, streamErr := e.ExecuteStream(ctx, auth, modifiedReq, opts)
+		if streamErr != nil {
+			return stream, streamErr
+		}
+		out := make(chan cliproxyexecutor.StreamChunk, 256)
+		go func() {
+			defer close(out)
+			var chunks [][]byte
+			for chunk := range stream.Chunks {
+				if chunk.Err != nil {
+					select {
+					case <-ctx.Done():
+						return
+					case out <- chunk:
+					}
+					return
+				}
+				if len(chunk.Payload) > 0 {
+					chunks = append(chunks, bytes.Clone(chunk.Payload))
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case out <- chunk:
+				}
+			}
+			analysis := analyzeBufferedOpenAIStreamV2(chunks)
+			log.Infof("kiro-v2/websearch: openai stream stop=%s followup_search=%v query=%s", analysis.StopReason, analysis.HasWebSearchToolUse, analysis.WebSearchQuery)
+		}()
+		return &cliproxyexecutor.StreamResult{Chunks: out}, nil
+	}
+
+	machineID, authAttrs := e.getMCPAuthContextV2(auth, token)
 	httpClient := e.newMCPHTTPClientV2(ctx, auth)
-	kiroclaude.FetchToolDescription(mcpEndpoint, token, httpClient, fp, authAttrs)
 
 	out := make(chan cliproxyexecutor.StreamChunk, 256)
 
 	go func() {
 		defer close(out)
 
-		msgStart := kiroclaude.SseEvent{
+		msgStart := kiroSSEEventV2{
 			Event: "message_start",
 			Data: map[string]interface{}{
 				"type": "message_start",
 				"message": map[string]interface{}{
-					"id":            kiroclaude.GenerateMessageID(),
+					"id":            generateMessageIDV2(),
 					"type":          "message",
 					"role":          "assistant",
 					"model":         req.Model,
@@ -1577,9 +1703,9 @@ func (e *KiroExecutorV2) handleWebSearchStreamV2(
 
 		contentBlockIndex := 0
 		currentQuery := query
-		currentToolUseID := fmt.Sprintf("srvtoolu_%s", kiroclaude.GenerateToolUseID())
+		currentToolUseID := fmt.Sprintf("srvtoolu_%s", generateToolUseIDV2())
 
-		simplifiedPayload, simplifyErr := kiroclaude.ReplaceWebSearchToolDescription(bytes.Clone(req.Payload))
+		simplifiedPayload, simplifyErr := replaceWebSearchToolDescriptionV2(bytes.Clone(req.Payload))
 		if simplifyErr != nil {
 			log.Warnf("kiro-v2/websearch: failed to simplify web_search tool: %v", simplifyErr)
 			simplifiedPayload = bytes.Clone(req.Payload)
@@ -1590,18 +1716,18 @@ func (e *KiroExecutorV2) handleWebSearchStreamV2(
 			log.Infof("kiro-v2/websearch: iteration %d/%d — query: %s",
 				iteration+1, maxWebSearchIterationsV2, currentQuery)
 
-			_, mcpRequest := kiroclaude.CreateMcpRequest(currentQuery)
-			handler := kiroclaude.NewWebSearchHandler(mcpEndpoint, token, httpClient, fp, authAttrs)
-			mcpResponse, mcpErr := handler.CallMcpAPI(mcpRequest)
+			_, mcpRequest := createMcpRequestV2(currentQuery)
+			handler := newWebSearchHandlerV2(mcpEndpoint, token, httpClient, machineID, authAttrs)
+			mcpResponse, mcpErr := handler.callMcpAPI(mcpRequest)
 
-			var searchResults *kiroclaude.WebSearchResults
+			var searchResults *kiroWebSearchResultsV2
 			if mcpErr != nil {
 				log.Warnf("kiro-v2/websearch: MCP failed: %v", mcpErr)
 			} else {
-				searchResults = kiroclaude.ParseSearchResults(mcpResponse)
+				searchResults = parseSearchResultsV2(mcpResponse)
 			}
 
-			searchEvents := kiroclaude.GenerateSearchIndicatorEvents(currentQuery, currentToolUseID, searchResults, contentBlockIndex)
+			searchEvents := generateSearchIndicatorEventsV2(currentQuery, currentToolUseID, searchResults, contentBlockIndex)
 			for _, event := range searchEvents {
 				select {
 				case <-ctx.Done():
@@ -1612,7 +1738,7 @@ func (e *KiroExecutorV2) handleWebSearchStreamV2(
 			contentBlockIndex += 2
 
 			var injectErr error
-			currentPayload, injectErr = kiroclaude.InjectToolResultsClaude(currentPayload, currentToolUseID, currentQuery, searchResults)
+			currentPayload, injectErr = injectToolResultsClaudeV2(currentPayload, currentToolUseID, currentQuery, searchResults)
 			if injectErr != nil {
 				log.Warnf("kiro-v2/websearch: inject failed: %v", injectErr)
 				e.sendFallbackTextV2(ctx, out, contentBlockIndex, currentQuery, searchResults)
@@ -1626,12 +1752,12 @@ func (e *KiroExecutorV2) handleWebSearchStreamV2(
 				break
 			}
 
-			analysis := kiroclaude.AnalyzeBufferedStream(kiroChunks)
+			analysis := analyzeBufferedStreamV2(kiroChunks)
 			log.Infof("kiro-v2/websearch: iteration %d — stop: %s, has_tool_use: %v, query: %s",
 				iteration+1, analysis.StopReason, analysis.HasWebSearchToolUse, analysis.WebSearchQuery)
 
 			if analysis.HasWebSearchToolUse && analysis.WebSearchQuery != "" && iteration+1 < maxWebSearchIterationsV2 {
-				filtered := kiroclaude.FilterChunksForClient(kiroChunks, analysis.WebSearchToolUseIndex, contentBlockIndex)
+				filtered := filterChunksForClientV2(kiroChunks, analysis.WebSearchToolUseIdx, contentBlockIndex)
 				for _, chunk := range filtered {
 					select {
 					case <-ctx.Done():
@@ -1640,13 +1766,13 @@ func (e *KiroExecutorV2) handleWebSearchStreamV2(
 					}
 				}
 				currentQuery = analysis.WebSearchQuery
-				currentToolUseID = analysis.WebSearchToolUseId
+				currentToolUseID = analysis.WebSearchToolUseID
 				continue
 			}
 
 			for _, chunk := range kiroChunks {
 				if contentBlockIndex > 0 && len(chunk) > 0 {
-					adjusted, shouldFwd := kiroclaude.AdjustSSEChunk(chunk, contentBlockIndex)
+					adjusted, shouldFwd := adjustSSEChunkV2(chunk, contentBlockIndex)
 					if !shouldFwd {
 						continue
 					}
@@ -1681,7 +1807,7 @@ func (e *KiroExecutorV2) callKiroAndBufferV2(
 	opts cliproxyexecutor.Options,
 	claudePayload []byte,
 ) ([][]byte, error) {
-	strippedPayload, _ := kiroclaude.StripWebSearchTool(claudePayload)
+	strippedPayload, _ := stripWebSearchToolV2(claudePayload)
 
 	modifiedReq := originalReq
 	modifiedReq.Payload = strippedPayload
@@ -1690,8 +1816,6 @@ func (e *KiroExecutorV2) callKiroAndBufferV2(
 	if err != nil {
 		return nil, fmt.Errorf("kiro-v2/websearch: prepare failed: %w", err)
 	}
-
-	rc.sourceFormat = "claude"
 
 	stream, err := e.executeStreamWithRetry(rc)
 	if err != nil {
@@ -1718,11 +1842,11 @@ func (e *KiroExecutorV2) sendFallbackTextV2(
 	out chan<- cliproxyexecutor.StreamChunk,
 	contentBlockIndex int,
 	query string,
-	searchResults *kiroclaude.WebSearchResults,
+	searchResults *kiroWebSearchResultsV2,
 ) {
-	summary := kiroclaude.FormatSearchContextPrompt(query, searchResults)
+	summary := formatSearchContextPromptV2(query, searchResults)
 
-	events := []kiroclaude.SseEvent{
+	events := []kiroSSEEventV2{
 		{
 			Event: "content_block_start",
 			Data: map[string]interface{}{
@@ -1784,7 +1908,7 @@ func (e *KiroExecutorV2) sendFallbackTextV2(
 
 // withoutWebSearchV2 returns a copy of the request with web_search tool stripped.
 func withoutWebSearchV2(req cliproxyexecutor.Request) cliproxyexecutor.Request {
-	stripped, err := kiroclaude.StripWebSearchTool(bytes.Clone(req.Payload))
+	stripped, err := stripWebSearchToolV2(bytes.Clone(req.Payload))
 	if err != nil {
 		return req
 	}
@@ -1802,15 +1926,16 @@ func (e *KiroExecutorV2) getAPIRegionV2(auth *coreauth.Auth) string {
 }
 
 // getMCPAuthContextV2 extracts fingerprint and auth attributes for MCP calls.
-func (e *KiroExecutorV2) getMCPAuthContextV2(auth *coreauth.Auth, token string) (*kiroauth.Fingerprint, map[string]string) {
+func (e *KiroExecutorV2) getMCPAuthContextV2(auth *coreauth.Auth, token string) (string, map[string]string) {
 	accountKey := getAccountKeyV2(auth)
 	fp := kiroauth.GlobalFingerprintManager().GetFingerprint(accountKey)
+	machineID := resolveKiroMachineIDV2(auth, fp)
 
 	var authAttrs map[string]string
 	if auth != nil {
 		authAttrs = auth.Attributes
 	}
-	return fp, authAttrs
+	return machineID, authAttrs
 }
 
 // newMCPHTTPClientV2 creates an HTTP client for MCP API calls.

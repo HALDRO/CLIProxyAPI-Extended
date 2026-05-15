@@ -781,7 +781,7 @@ func GetKiroModels() []*ModelInfo {
 	return []*ModelInfo{
 		// --- Base Models ---
 		{
-			ID:                  "kiro-auto",
+			ID:                  "auto",
 			Object:              "model",
 			Created:             1732752000,
 			OwnedBy:             "aws",
@@ -793,7 +793,19 @@ func GetKiroModels() []*ModelInfo {
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
-			ID:                  "kiro-claude-opus-4-6",
+			ID:                  "claude-opus-4-7",
+			Object:              "model",
+			Created:             1746144000,
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Kiro Claude Opus 4.7",
+			Description:         "Claude Opus 4.7 via Kiro (2.2x credit)",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
+		},
+		{
+			ID:                  "claude-opus-4-6",
 			Object:              "model",
 			Created:             1736899200, // 2025-01-15
 			OwnedBy:             "aws",
@@ -805,7 +817,7 @@ func GetKiroModels() []*ModelInfo {
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
-			ID:                  "kiro-claude-sonnet-4-6",
+			ID:                  "claude-sonnet-4-6",
 			Object:              "model",
 			Created:             1739836800, // 2025-02-18
 			OwnedBy:             "aws",
@@ -817,7 +829,7 @@ func GetKiroModels() []*ModelInfo {
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
-			ID:                  "kiro-claude-opus-4-5",
+			ID:                  "claude-opus-4-5",
 			Object:              "model",
 			Created:             1732752000,
 			OwnedBy:             "aws",
@@ -829,7 +841,7 @@ func GetKiroModels() []*ModelInfo {
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
-			ID:                  "kiro-claude-sonnet-4-5",
+			ID:                  "claude-sonnet-4-5",
 			Object:              "model",
 			Created:             1732752000,
 			OwnedBy:             "aws",
@@ -841,7 +853,7 @@ func GetKiroModels() []*ModelInfo {
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
-			ID:                  "kiro-claude-sonnet-4",
+			ID:                  "claude-sonnet-4",
 			Object:              "model",
 			Created:             1732752000,
 			OwnedBy:             "aws",
@@ -853,7 +865,7 @@ func GetKiroModels() []*ModelInfo {
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
-			ID:                  "kiro-claude-haiku-4-5",
+			ID:                  "claude-haiku-4-5",
 			Object:              "model",
 			Created:             1732752000,
 			OwnedBy:             "aws",
@@ -866,7 +878,7 @@ func GetKiroModels() []*ModelInfo {
 		},
 		// --- 第三方模型 (通过 Kiro 接入) ---
 		{
-			ID:                  "kiro-deepseek-3-2",
+			ID:                  "deepseek-3-2",
 			Object:              "model",
 			Created:             1732752000,
 			OwnedBy:             "aws",
@@ -878,7 +890,7 @@ func GetKiroModels() []*ModelInfo {
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
-			ID:                  "kiro-minimax-m2-1",
+			ID:                  "minimax-m2-1",
 			Object:              "model",
 			Created:             1732752000,
 			OwnedBy:             "aws",
@@ -890,7 +902,7 @@ func GetKiroModels() []*ModelInfo {
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
-			ID:                  "kiro-qwen3-coder-next",
+			ID:                  "qwen3-coder-next",
 			Object:              "model",
 			Created:             1732752000,
 			OwnedBy:             "aws",
@@ -902,7 +914,7 @@ func GetKiroModels() []*ModelInfo {
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
-			ID:                  "kiro-gpt-4o",
+			ID:                  "gpt-4o",
 			Object:              "model",
 			Created:             1732752000,
 			OwnedBy:             "aws",
@@ -913,7 +925,7 @@ func GetKiroModels() []*ModelInfo {
 			MaxCompletionTokens: 16384,
 		},
 		{
-			ID:                  "kiro-gpt-4",
+			ID:                  "gpt-4",
 			Object:              "model",
 			Created:             1732752000,
 			OwnedBy:             "aws",
@@ -924,7 +936,7 @@ func GetKiroModels() []*ModelInfo {
 			MaxCompletionTokens: 8192,
 		},
 		{
-			ID:                  "kiro-gpt-4-turbo",
+			ID:                  "gpt-4-turbo",
 			Object:              "model",
 			Created:             1732752000,
 			OwnedBy:             "aws",
@@ -935,7 +947,7 @@ func GetKiroModels() []*ModelInfo {
 			MaxCompletionTokens: 16384,
 		},
 		{
-			ID:                  "kiro-gpt-3-5-turbo",
+			ID:                  "gpt-3-5-turbo",
 			Object:              "model",
 			Created:             1732752000,
 			OwnedBy:             "aws",
@@ -960,6 +972,17 @@ func GetAmazonQModels() []*ModelInfo {
 			Type:                "kiro", // Uses Kiro executor - same API
 			DisplayName:         "Amazon Q Auto",
 			Description:         "Automatic model selection by Amazon Q",
+			ContextLength:       200000,
+			MaxCompletionTokens: 64000,
+		},
+		{
+			ID:                  "amazonq-claude-opus-4.7",
+			Object:              "model",
+			Created:             1746144000,
+			OwnedBy:             "aws",
+			Type:                "kiro",
+			DisplayName:         "Amazon Q Claude Opus 4.7",
+			Description:         "Claude Opus 4.7 via Amazon Q (2.2x credit)",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
 		},

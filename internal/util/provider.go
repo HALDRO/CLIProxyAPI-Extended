@@ -56,6 +56,13 @@ func GetProviderName(modelName string) []string {
 	for _, provider := range registry.GetGlobalRegistry().GetModelProviders(normalizedModelName) {
 		appendProvider(provider)
 	}
+	if len(providers) == 0 {
+		if publicKiro := registry.PublicKiroModelID(normalizedModelName); publicKiro != "" && publicKiro != normalizedModelName {
+			for _, provider := range registry.GetGlobalRegistry().GetModelProviders(publicKiro) {
+				appendProvider(provider)
+			}
+		}
+	}
 
 	if len(providers) > 0 {
 		return providers

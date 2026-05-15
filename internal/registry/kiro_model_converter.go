@@ -8,6 +8,12 @@ import (
 	"time"
 )
 
+type KiroRouteInfo struct {
+	CanonicalID string
+	UpstreamID  string
+	Origin      string
+}
+
 // KiroAPIModel represents a model from Kiro API response.
 // This is a local copy to avoid import cycles with the kiro package.
 // The structure mirrors kiro.KiroModel for easy data conversion.
@@ -72,24 +78,27 @@ func ConvertKiroAPIModels(kiroModels []*KiroAPIModel) []*ModelInfo {
 			continue
 		}
 
-		// Normalize the model ID to kiro-* format
-		normalizedID := normalizeKiroModelID(km.ModelID)
-		if normalizedID == "" {
+		routeInfo := canonicalKiroRouteInfo(km.ModelID)
+		if routeInfo.CanonicalID == "" {
 			continue
 		}
-		if _, exists := seenIDs[normalizedID]; exists {
+		publicID := publicKiroModelIDFromCanonical(routeInfo.CanonicalID)
+		if publicID == "" {
 			continue
 		}
-		seenIDs[normalizedID] = struct{}{}
+		if _, exists := seenIDs[publicID]; exists {
+			continue
+		}
+		seenIDs[publicID] = struct{}{}
 
 		// Create ModelInfo with converted data
 		info := &ModelInfo{
-			ID:          normalizedID,
+			ID:          publicID,
 			Object:      "model",
 			Created:     now,
 			OwnedBy:     "aws",
 			Type:        "kiro",
-			DisplayName: generateKiroDisplayName(km.ModelName, normalizedID),
+			DisplayName: generateKiroDisplayName(km.ModelName, publicID),
 			Description: km.Description,
 			// Use MaxInputTokens from API if available, otherwise use default
 			ContextLength:       getContextLength(km.MaxInputTokens),
@@ -206,6 +215,10 @@ func normalizeKiroModelID(modelID string) string {
 		return ""
 	}
 
+	if strings.HasPrefix(modelID, "amazonq-") {
+		modelID = strings.TrimPrefix(modelID, "amazonq-")
+	}
+
 	// Replace dots with hyphens (e.g., 4.5 → 4-5)
 	normalized := strings.ReplaceAll(modelID, ".", "-")
 
@@ -215,6 +228,58 @@ func normalizeKiroModelID(modelID string) string {
 	}
 
 	return normalized
+}
+
+func canonicalKiroRouteInfo(modelID string) KiroRouteInfo {
+	canonicalID := normalizeKiroModelID(modelID)
+	if canonicalID == "" {
+		return KiroRouteInfo{}
+	}
+
+	baseCanonical := strings.TrimSuffix(canonicalID, "-agentic")
+	upstreamBase := strings.TrimPrefix(baseCanonical, "kiro-")
+	upstreamBase = strings.ReplaceAll(upstreamBase, "-4-7", "-4.7")
+	upstreamBase = strings.ReplaceAll(upstreamBase, "-4-6", "-4.6")
+	upstreamBase = strings.ReplaceAll(upstreamBase, "-4-5", "-4.5")
+
+	origin := "AI_EDITOR"
+	if strings.HasPrefix(strings.TrimSpace(strings.ToLower(modelID)), "amazonq-") {
+		origin = "CLI"
+	}
+
+	if strings.HasSuffix(canonicalID, "-agentic") {
+		return KiroRouteInfo{
+			CanonicalID: canonicalID,
+			UpstreamID:  upstreamBase + "-agentic",
+			Origin:      origin,
+		}
+	}
+
+	return KiroRouteInfo{
+		CanonicalID: canonicalID,
+		UpstreamID:  upstreamBase,
+		Origin:      origin,
+	}
+}
+
+func NormalizeKiroRoute(modelID string) KiroRouteInfo {
+	return canonicalKiroRouteInfo(modelID)
+}
+
+func publicKiroModelIDFromCanonical(canonicalID string) string {
+	if canonicalID == "" {
+		return ""
+	}
+	publicID := strings.TrimPrefix(canonicalID, "kiro-")
+	publicID = strings.ReplaceAll(publicID, "-4-7", "-4-7")
+	publicID = strings.ReplaceAll(publicID, "-4-6", "-4-6")
+	publicID = strings.ReplaceAll(publicID, "-4-5", "-4-5")
+	return publicID
+}
+
+func PublicKiroModelID(modelID string) string {
+	info := NormalizeKiroRoute(modelID)
+	return publicKiroModelIDFromCanonical(info.CanonicalID)
 }
 
 // generateKiroDisplayName creates a human-readable display name.
